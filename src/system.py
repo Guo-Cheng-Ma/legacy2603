@@ -2,7 +2,7 @@ from .type import *
 from .model import *
 from .devices import *
 from .config import *
-RAMPATH = "./ramulator2"
+RAMPATH = "/home/lizhuoran200/vstack/attacc_simulator/ramulator2/ramulator2"
 RAMLOG = "./ramulator.out"
 
 OPB_PRINT = False
