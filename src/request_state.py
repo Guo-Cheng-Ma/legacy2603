@@ -59,5 +59,9 @@ class RequestState:
     def output_length(self) -> int:
         return self.trace.output_length
 
+    @property
+    def prompt_block_count(self) -> int:
+        return len(self.trace.hash_ids)
+
     def set_state(self, state: RequestLifecycle) -> None:
         self.state = state

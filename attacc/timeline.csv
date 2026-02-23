@@ -1,3 +1,4 @@
 timestamp,step,status,files,build,notes
 2026-02-23T20:28:31+08:00,C1,completed,src/request_state.py|src/trace_loader.py,cmake+make pass,added trace schema/loader with hash block validation and deterministic ordering
 2026-02-23T20:32:04+08:00,C2,completed,src/request_state.py|src/continuous_scheduler.py,cmake+make pass,added lifecycle enum and dry-run continuous scheduler skeleton
+2026-02-23T20:33:42+08:00,C3,completed,src/kv_cache.py|src/request_state.py,cmake+make pass,added global KV cache manager with LRU eviction and byte accounting
