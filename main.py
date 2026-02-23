@@ -5,7 +5,7 @@ from src.system import *
 from src.type import *
 from src.config import *
 from src.ramulator_wrapper import *
-from src.trace_simulator import run_trace_simulation
+from src.trace_simulator import run_trace_simulation, write_trace_outputs
 
 RAMULATOR = False
 
@@ -213,8 +213,9 @@ def main():
             kv_hbm_ratio=args.kv_hbm_ratio,
         )
         summary = result['summary']
+        write_trace_outputs(result, summary_path='trace_summary.csv', requests_path='trace_requests.csv')
         print(
-            "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={}".format(
+            "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={} outputs=[trace_summary.csv,trace_requests.csv]".format(
                 summary['num_requests'],
                 summary['total_time_s'],
                 summary['kv_hit_blocks'],
