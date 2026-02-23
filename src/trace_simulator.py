@@ -109,3 +109,13 @@ def run_trace_simulation(
         'requests': request_rows,
         'snapshot': snapshot,
     }
+
+
+def run_trace_mode(system, args):
+    return run_trace_simulation(
+        system=system,
+        trace_file=args.trace_file,
+        max_batch_size=args.max_batch_size,
+        prefill_chunk_tokens=args.prefill_chunk_tokens,
+        kv_hbm_ratio=args.kv_hbm_ratio,
+    )

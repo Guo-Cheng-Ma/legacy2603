@@ -5,6 +5,7 @@ from src.system import *
 from src.type import *
 from src.config import *
 from src.ramulator_wrapper import *
+from src.trace_simulator import run_trace_simulation
 
 RAMULATOR = False
 
@@ -132,6 +133,27 @@ def main():
         help=
         "batch size, default = 1"
     )
+    parser.add_argument("--mode",
+                        type=str,
+                        default='fixed',
+                        choices=['fixed', 'trace'],
+                        help="simulation mode")
+    parser.add_argument("--trace-file",
+                        type=str,
+                        default='llm-req-inputs/qwen_thinking_blksz_16.jsonl',
+                        help="trace jsonl file for trace mode")
+    parser.add_argument("--max-batch-size",
+                        type=int,
+                        default=16,
+                        help="max active requests in trace mode")
+    parser.add_argument("--prefill-chunk-tokens",
+                        type=int,
+                        default=128,
+                        help="chunk size for prefill micro-step in trace mode")
+    parser.add_argument("--kv-hbm-ratio",
+                        type=float,
+                        default=0.3,
+                        help="fraction of HBM reserved for runtime KV cache")
 
     args = parser.parse_args()
 
@@ -158,7 +180,7 @@ def main():
     gmem_cap = args.gmemcap * 1024 * 1024 * 1024
     output_path = "output.csv"
     if os.path.exists(output_path):
-        os.system("rm " + output_path)
+        os.remove(output_path)
 
     # set system
     dtype = DataType.W16A16 if args.word == 2 else DataType.W8A8
@@ -182,14 +204,32 @@ def main():
         system.set_xpu(xpu_config['GPU'])
         system.set_accelerator(modelinfos, DeviceType.CPU, xpu_config['CPU'])
 
-    run(system,
-        args.batch,
-        args.lin,
-        args.lout,
-        pipe=args.pipeopt,
-        parallel=args.ffopt,
-        output_file=output_path,
-        power_constraint=args.powerlimit)
+    if args.mode == 'trace':
+        result = run_trace_simulation(
+            system=system,
+            trace_file=args.trace_file,
+            max_batch_size=args.max_batch_size,
+            prefill_chunk_tokens=args.prefill_chunk_tokens,
+            kv_hbm_ratio=args.kv_hbm_ratio,
+        )
+        summary = result['summary']
+        print(
+            "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={}".format(
+                summary['num_requests'],
+                summary['total_time_s'],
+                summary['kv_hit_blocks'],
+                summary['kv_miss_blocks'],
+            )
+        )
+    else:
+        run(system,
+            args.batch,
+            args.lin,
+            args.lout,
+            pipe=args.pipeopt,
+            parallel=args.ffopt,
+            output_file=output_path,
+            power_constraint=args.powerlimit)
 
 
 if __name__ == "__main__":
