@@ -245,3 +245,14 @@ class Transformer:
                       self.hdim, 1, 1))
 
             self.gen_decoder.append(copy.deepcopy(decoder))
+
+    def build_prefill_layers(self, batch, effective_lin, attn_on_hetero=False):
+        effective_lin = max(1, int(effective_lin))
+        self.build(batch, effective_lin, 2, attn_on_hetero)
+        return copy.deepcopy(self.sum_decoder)
+
+    def build_decode_layers(self, batch, active_context_len, attn_on_hetero=False):
+        active_context_len = max(1, int(active_context_len))
+        lin_for_stage = max(1, active_context_len - 1)
+        self.build(batch, lin_for_stage, 2, attn_on_hetero)
+        return copy.deepcopy(self.gen_decoder[0])

@@ -444,6 +444,57 @@ class System:
         else:
             perfs = [output]
 
+    def _estimate_layer_time_energy(self, layer):
+        if layer.type in [LayerType.MATMUL, LayerType.SOFTMAX, LayerType.X2G]:
+            exec_time, energy = self.devices['Acc'].get_time_and_energy(layer)
+        else:
+            exec_time, energy = self.devices['GPU'].get_time_and_energy(layer)
+        return exec_time, energy
+
+    def estimate_prefill_microbatch(self, batch_size, effective_lin):
+        assert self.model_set, "Need to set_model"
+        layers = self.model.build_prefill_layers(
+            batch_size,
+            effective_lin,
+            self.hetero_name in [DeviceType.CPU, DeviceType.PIM],
+        )
+
+        latency = 0.0
+        energy = [0, 0, 0, 0, 0, 0]
+        for layer in layers:
+            exec_time, eng = self.devices['GPU'].get_time_and_energy(layer)
+            latency += exec_time
+            energy = [energy[i] + eng[i] for i in range(len(energy))]
+
+        return {
+            'latency': latency,
+            'energy': energy,
+            'batch_size': batch_size,
+            'effective_lin': effective_lin,
+        }
+
+    def estimate_decode_step(self, batch_size, active_context_len):
+        assert self.model_set, "Need to set_model"
+        layers = self.model.build_decode_layers(
+            batch_size,
+            active_context_len,
+            self.hetero_name in [DeviceType.CPU, DeviceType.PIM],
+        )
+
+        latency = 0.0
+        energy = [0, 0, 0, 0, 0, 0]
+        for layer in layers:
+            exec_time, eng = self._estimate_layer_time_energy(layer)
+            latency += exec_time
+            energy = [energy[i] + eng[i] for i in range(len(energy))]
+
+        return {
+            'latency': latency,
+            'energy': energy,
+            'batch_size': batch_size,
+            'active_context_len': active_context_len,
+        }
+
     def get_required_mem_capacity(self, batch_size, lin, lout):
         ndec = self.model.ndec
         hdim = self.model.hdim
