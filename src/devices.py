@@ -259,6 +259,14 @@ class xPU:
             energy = self.num_xpu * traffic * self.energy_table['comm']
         return exec_time, [0, 0, 0, 0, 0, energy]
 
+    def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+        bytes_size = max(0, int(bytes_size))
+        link_bw = self.max_interface_bandwidth if bw_bps is None else float(bw_bps)
+        transfer = (bytes_size / link_bw) if link_bw > 0 else 0.0
+        latency = float(setup_s) + transfer
+        energy_nj = bytes_size * float(energy_pj_per_byte) / 1000.0
+        return latency, energy_nj
+
     def get_time_and_energy(self, layer: Layer):
         if layer.type in [LayerType.X2G, LayerType.G2G]:
             return self._io_time_energy(layer)
@@ -322,6 +330,14 @@ class PIM:
         ) / 2 * self.energy_table['alu'] * self.num_attacc
 
         return [e_off, 0, 0, 0, e_flop, 0]
+
+    def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+        bytes_size = max(0, int(bytes_size))
+        link_bw = self.max_interface_bandwidth if bw_bps is None else float(bw_bps)
+        transfer = (bytes_size / link_bw) if link_bw > 0 else 0.0
+        latency = float(setup_s) + transfer
+        energy_nj = bytes_size * float(energy_pj_per_byte) / 1000.0
+        return latency, energy_nj
 
     def get_time_and_energy(self, layer: Layer):
         if layer.type == LayerType.X2G:

@@ -495,6 +495,20 @@ class System:
             'active_context_len': active_context_len,
         }
 
+    def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+        device = self.devices['GPU']
+        latency, energy_nj = device.estimate_kv_dma(
+            bytes_size=bytes_size,
+            setup_s=setup_s,
+            bw_bps=bw_bps,
+            energy_pj_per_byte=energy_pj_per_byte,
+        )
+        return {
+            'latency': latency,
+            'energy_nj': energy_nj,
+            'bytes': bytes_size,
+        }
+
     def get_required_mem_capacity(self, batch_size, lin, lout):
         ndec = self.model.ndec
         hdim = self.model.hdim

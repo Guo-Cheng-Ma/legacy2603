@@ -16,6 +16,7 @@ class LayerType(Enum):
     NORM = 4
     G2G = 5
     X2G = 6
+    KV_DMA = 7
 
 
 class DeviceType(Enum):
