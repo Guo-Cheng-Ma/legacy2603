@@ -2,6 +2,7 @@ import pandas as pd
 import subprocess
 import math
 import os
+import sys
 from src.config import *
 from src.model import *
 from src.type import *
@@ -99,16 +100,34 @@ class Ramulator:
         trace_exc = os.path.join(
             self.ramulator_dir,
             "trace_gen/gen_trace_attacc_{}.py".format(pim_type_name))
-        trace_args = "--dhead {} --nhead {} --seqlen {} --dbyte {} --output {}".format(
-            self.dhead, num_ops_per_hbm, l, dbyte, trace_file)
-
-        gen_trace_cmd = f"python {trace_exc} {trace_args}"
+        # Ensure maxlen is always valid for current seqlen.
+        # Trace generators use maxlen for partition sizing.
+        maxlen = max(int(l), 4096)
 
         # generate trace
         try:
-            os.system(gen_trace_cmd)
+            subprocess.run(
+                [
+                    sys.executable,
+                    trace_exc,
+                    "--dhead",
+                    str(self.dhead),
+                    "--nhead",
+                    str(num_ops_per_hbm),
+                    "--seqlen",
+                    str(l),
+                    "--maxlen",
+                    str(maxlen),
+                    "--dbyte",
+                    str(dbyte),
+                    "--output",
+                    trace_file,
+                ],
+                check=True,
+            )
         except Exception as e:
             print(f"Error: {e}")
+            raise
 
         # run ramulator
         ramulator_file = os.path.join(self.ramulator_dir, "ramulator2")
@@ -125,9 +144,9 @@ class Ramulator:
             assert 0
 
         # remove trace
-        rm_trace_cmd = f"rm {trace_file}"
         try:
-            os.system(rm_trace_cmd)
+            if os.path.exists(trace_file):
+                os.remove(trace_file)
         except Exception as e:
             print(f"Error: {e}")
 
@@ -175,10 +194,10 @@ class Ramulator:
             result = self.run_ramulator(pim_type, l, num_ops_per_hbm,
                                         layer.dbyte, yaml_file, file_name)
 
-            # remove trace
-            rm_yaml_cmd = f"rm {yaml_file}"
+            # remove yaml
             try:
-                os.system(rm_yaml_cmd)
+                if os.path.exists(yaml_file):
+                    os.remove(yaml_file)
             except Exception as e:
                 print(f"Error: {e}")
 

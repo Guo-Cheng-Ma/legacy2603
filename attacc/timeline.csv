@@ -10,3 +10,4 @@ timestamp,step,status,files,build,notes
 2026-02-23T20:43:52+08:00,C9,completed,src/trace_simulator.py|main.py,cmake+make pass,added trace summary/request CSV output writers and CLI integration
 2026-02-23T20:44:50+08:00,C10,completed,src/type.py|src/devices.py|src/system.py,cmake+make pass,added optional KV DMA logical type and latency/energy estimator hooks
 2026-02-23T20:45:53+08:00,C11,completed,workflow.md|attacc-README.md,cmake+make pass,documented trace mode workflow, global KV reuse semantics, and example commands
+2026-02-23T21:20:20+08:00,C12,completed,src/ramulator_wrapper.py,cmake+make pass,fixed trace generator args: pass --maxlen>=--seqlen and removed shell rm usage; validated with GPT-175B trace run showing maxlen==seqlen
