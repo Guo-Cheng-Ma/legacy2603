@@ -4,3 +4,4 @@ timestamp,step,status,files,build,notes
 2026-02-23T20:33:42+08:00,C3,completed,src/kv_cache.py|src/request_state.py,cmake+make pass,added global KV cache manager with LRU eviction and byte accounting
 2026-02-23T20:35:10+08:00,C4,completed,src/system.py|src/model.py,cmake+make pass,added variable-shape prefill/decode micro-cost APIs while preserving fixed simulate path
 2026-02-23T20:36:26+08:00,C5,completed,src/continuous_scheduler.py|src/kv_cache.py,cmake+make pass,implemented chunked prefill with global KV hash hit reuse and miss insert
+2026-02-23T20:38:22+08:00,C6,completed,src/continuous_scheduler.py|src/request_state.py,cmake+make pass,added token-step decode progression, timing fields, completion, and immediate backfill

@@ -17,7 +17,7 @@ class SchedulerSnapshot:
 
 
 class ContinuousScheduler:
-    """FIFO continuous-batching scheduler with chunked prefill + KV hit skip."""
+    """FIFO continuous-batching scheduler with chunked prefill and decode steps."""
 
     def __init__(
         self,
@@ -114,12 +114,46 @@ class ContinuousScheduler:
 
         return prefill_latency
 
+    def _step_decode(self) -> float:
+        decoding = [r for r in self.active.values() if r.state == RequestLifecycle.DECODING]
+        if not decoding:
+            return 0.0
+
+        decode_latency = 0.0
+        max_context_len = max(r.input_length + r.generated_tokens + 1 for r in decoding)
+        if self.system is not None:
+            estimate = self.system.estimate_decode_step(len(decoding), max_context_len)
+            decode_latency = estimate['latency']
+
+        done_ids = []
+        finished_time = self.sim_time + decode_latency
+        for req in decoding:
+            req.generated_tokens += 1
+            if req.first_token_time is None:
+                req.first_token_time = finished_time
+            if req.generated_tokens >= req.output_length:
+                req.set_state(RequestLifecycle.DONE)
+                req.finish_time = finished_time
+                done_ids.append(req.req_id)
+
+        for req_id in done_ids:
+            self.done[req_id] = self.active.pop(req_id)
+
+        return decode_latency
+
     def step(self) -> SchedulerSnapshot:
         self._admit_arrivals()
         self._backfill_active_slots()
 
         prefill_latency = self._step_prefill()
-        self.sim_time += prefill_latency
+        decode_latency = self._step_decode()
+        step_latency = max(prefill_latency, decode_latency)
+
+        self.sim_time += step_latency
+
+        # Immediate backfill on completion in same scheduling iteration.
+        self._admit_arrivals()
+        self._backfill_active_slots()
 
         return self.snapshot()
 
@@ -130,6 +164,22 @@ class ContinuousScheduler:
         self._admit_arrivals()
         self._backfill_active_slots()
         self.sim_time += dt
+
+        return self.snapshot()
+
+    def run(self, max_steps: int = 10_000_000) -> SchedulerSnapshot:
+        steps = 0
+        while len(self.done) < len(self.requests):
+            prev_time = self.sim_time
+            prev_done = len(self.done)
+            self.step()
+            steps += 1
+            if steps >= max_steps:
+                raise RuntimeError("scheduler exceeded max_steps")
+
+            # If no progress is possible, jump to next arrival time.
+            if self.sim_time == prev_time and len(self.done) == prev_done and not self.active and self.arrival_idx < len(self.requests):
+                self.sim_time = self.requests[self.arrival_idx].timestamp
 
         return self.snapshot()
 

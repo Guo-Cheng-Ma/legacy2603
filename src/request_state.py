@@ -63,5 +63,17 @@ class RequestState:
     def prompt_block_count(self) -> int:
         return len(self.trace.hash_ids)
 
+    @property
+    def ttft(self) -> Optional[float]:
+        if self.first_token_time is None or self.timestamp is None:
+            return None
+        return self.first_token_time - self.timestamp
+
+    @property
+    def latency(self) -> Optional[float]:
+        if self.finish_time is None or self.timestamp is None:
+            return None
+        return self.finish_time - self.timestamp
+
     def set_state(self, state: RequestLifecycle) -> None:
         self.state = state
