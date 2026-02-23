@@ -79,9 +79,38 @@ def run_trace_simulation(
     max_batch_size: int,
     prefill_chunk_tokens: int,
     kv_hbm_ratio: float,
+    trace_debug: bool = False,
+    trace_debug_interval: int = 100,
 ):
+    if trace_debug:
+        print(
+            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_hbm_ratio={}".format(
+                trace_file,
+                max_batch_size,
+                prefill_chunk_tokens,
+                kv_hbm_ratio,
+            )
+        )
     requests = load_request_states(trace_file)
+    if trace_debug:
+        first_ts = requests[0].timestamp if requests else 0.0
+        last_ts = requests[-1].timestamp if requests else 0.0
+        print(
+            "[TRACE][sim] parsed requests={} first_ts={:.6f} last_ts={:.6f}".format(
+                len(requests),
+                first_ts,
+                last_ts,
+            )
+        )
     kv_cache = _build_kv_cache(system, kv_hbm_ratio)
+    if trace_debug:
+        kv_info = kv_cache.snapshot()
+        print(
+            "[TRACE][sim] kv cache capacity_bytes={} kv_bytes_per_block={}".format(
+                kv_info["capacity_bytes"],
+                kv_cache.kv_bytes_per_block,
+            )
+        )
 
     scheduler = ContinuousScheduler(
         requests=requests,
@@ -89,6 +118,8 @@ def run_trace_simulation(
         system=system,
         kv_cache=kv_cache,
         prefill_chunk_tokens=prefill_chunk_tokens,
+        debug=trace_debug,
+        debug_interval=trace_debug_interval,
     )
 
     if requests and requests[0].timestamp > 0:
@@ -125,6 +156,15 @@ def run_trace_simulation(
     summary['kv_evictions'] = summary['evictions']
     summary['dma_transfers'] = sum(req['dma_blocks'] for req in request_rows)
     summary['dma_time_s'] = 0.0
+    if trace_debug:
+        print(
+            "[TRACE][sim] finished total_time_s={:.6f} kv_hit_blocks={} kv_miss_blocks={} kv_evictions={}".format(
+                summary['total_time_s'],
+                summary['kv_hit_blocks'],
+                summary['kv_miss_blocks'],
+                summary['kv_evictions'],
+            )
+        )
 
     return {
         'summary': summary,

@@ -154,6 +154,13 @@ def main():
                         type=float,
                         default=0.3,
                         help="fraction of HBM reserved for runtime KV cache")
+    parser.add_argument("--trace-debug",
+                        action='store_true',
+                        help="enable detailed trace-mode debug logs")
+    parser.add_argument("--trace-debug-interval",
+                        type=int,
+                        default=100,
+                        help="print scheduler summary every N trace steps")
 
     args = parser.parse_args()
 
@@ -211,6 +218,8 @@ def main():
             max_batch_size=args.max_batch_size,
             prefill_chunk_tokens=args.prefill_chunk_tokens,
             kv_hbm_ratio=args.kv_hbm_ratio,
+            trace_debug=args.trace_debug,
+            trace_debug_interval=args.trace_debug_interval,
         )
         summary = result['summary']
         write_trace_outputs(result, summary_path='trace_summary.csv', requests_path='trace_requests.csv')
