@@ -183,6 +183,9 @@ class ContinuousScheduler:
 
         return self.snapshot()
 
+    def completed_requests(self):
+        return [self.done[key] for key in sorted(self.done.keys())]
+
     def snapshot(self) -> SchedulerSnapshot:
         num_done = len(self.done)
         num_active = len(self.active)
