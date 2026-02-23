@@ -44,6 +44,9 @@ class KVCacheManager:
         self._entries.move_to_end(hash_id)
         return True
 
+    def has(self, hash_id: int) -> bool:
+        return hash_id in self._entries
+
     def reserve_or_evict(self, required_bytes: int) -> int:
         """Evict until required bytes can be allocated. Returns evicted count."""
         if required_bytes <= 0:
