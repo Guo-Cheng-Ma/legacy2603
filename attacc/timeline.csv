@@ -1,0 +1,2 @@
+timestamp,step,status,files,build,notes
+2026-02-23T20:28:31+08:00,C1,completed,src/request_state.py|src/trace_loader.py,cmake+make pass,added trace schema/loader with hash block validation and deterministic ordering
