@@ -86,3 +86,44 @@
   - `len(hash_ids) == ceil(input_length / 16)` for all records.
   - multi-turn relationships are encoded by `parent_chat_id` chains (not repeated `chat_id` rows).
 
+## 5) Trace mode workflow (new)
+
+### Mode switch
+
+- `main.py` now supports:
+  - `--mode fixed` (legacy static `(batch, lin, lout)` path),
+  - `--mode trace` (continuous batching + trace-driven requests).
+
+### Trace mode runtime pipeline
+
+1. `src/trace_loader.py` parses JSONL requests and validates required fields.
+2. `src/kv_cache.py` manages global KV block cache (`hash_id` key, 16-token block, LRU eviction).
+3. `src/continuous_scheduler.py` runs:
+   - FIFO admission by `timestamp`,
+   - chunked prefill with KV hit-skip,
+   - one-token decode step,
+   - immediate backfill when a request completes.
+4. `src/trace_simulator.py` orchestrates run + metrics export.
+
+### KV reuse semantics
+
+- Reuse scope is global across all chats/users.
+- Reuse trigger is `hash_id` hit.
+- On hit: skip KV recomputation.
+- On miss: compute and insert block into KV cache.
+
+### Example trace input row
+
+```json
+{"chat_id": 0, "parent_chat_id": -1, "timestamp": 0.0, "input_length": 502, "output_length": 1494, "type": "thinking", "turn": 1, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]}
+```
+
+- Validation rule: `len(hash_ids) == ceil(input_length / 16)`.
+- For this sample: `ceil(502/16) = 32`, so 32 blocks is valid.
+
+### Trace mode outputs
+
+- `trace_summary.csv`:
+  - aggregate latency/throughput/KV hit metrics.
+- `trace_requests.csv`:
+  - per-request arrival/start/TTFT/finish and KV reuse counters.

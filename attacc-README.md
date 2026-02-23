@@ -39,7 +39,6 @@ $ mkdir build
 $ cd build
 $ cmake ..
 $ make -j
-$ cp ramulator2 ../ramulator2
 $ cd ../../
 ```
 
@@ -112,6 +111,46 @@ $ python main.py --system dgx-attacc --gpu A100a --ngpu 8 --model GPT-175B --lin
 
 ```
 
+### Trace mode (continuous batching + KV reuse)
+
+The simulator now supports a trace-driven mode:
+
+- variable `input_length` / `output_length` per request,
+- request arrival by `timestamp`,
+- continuous batching with immediate backfill,
+- global prefix-KV reuse by `hash_id`.
+
+Run example:
+
+```bash
+$ python main.py \
+  --mode trace \
+  --system dgx-attacc \
+  --gpu A100a \
+  --ngpu 8 \
+  --model GPT-175B \
+  --pim bank \
+  --trace-file llm-req-inputs/qwen_thinking_blksz_16.jsonl \
+  --max-batch-size 16 \
+  --prefill-chunk-tokens 128 \
+  --kv-hbm-ratio 0.3
+```
+
+Outputs:
+
+- `trace_summary.csv`
+- `trace_requests.csv`
+
+Trace record format (single JSONL row):
+
+```json
+{"chat_id": 0, "parent_chat_id": -1, "timestamp": 0.0, "input_length": 502, "output_length": 1494, "type": "thinking", "turn": 1, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]}
+```
+
+Validation rule:
+
+- `len(hash_ids) == ceil(input_length / 16)` (block size is 16 tokens).
+
 ## Details of the Ramulator for AttAcc
 ### How to Run
 1. Generate PIM command traces for the Transformer-based Generative Model.
@@ -160,5 +199,4 @@ We reflect the DRAM power constraint to AttAcc by increasing the delay between c
 We calculate these delay with the activation and read energy.
 
 To evaulate AttAcc with no power constraint (NPC), uncomment `preset: HBM3_5.2Gbps_NPC` and comment out `preset: HBM3_5.2Gbps` in yaml config files.
-
 
