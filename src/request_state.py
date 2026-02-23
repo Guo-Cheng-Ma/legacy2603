@@ -1,5 +1,14 @@
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import List, Optional
+
+
+class RequestLifecycle(str, Enum):
+    NOT_ARRIVED = "NOT_ARRIVED"
+    WAITING = "WAITING"
+    PREFILLING = "PREFILLING"
+    DECODING = "DECODING"
+    DONE = "DONE"
 
 
 @dataclass(frozen=True)
@@ -22,7 +31,7 @@ class RequestState:
     """Mutable runtime fields layered on top of immutable trace content."""
 
     trace: TraceRequest
-    state: str = "NOT_ARRIVED"
+    state: RequestLifecycle = RequestLifecycle.NOT_ARRIVED
     prefill_progress_tokens: int = 0
     generated_tokens: int = 0
     reused_blocks: int = 0
@@ -41,3 +50,14 @@ class RequestState:
     @property
     def timestamp(self) -> float:
         return self.trace.timestamp
+
+    @property
+    def input_length(self) -> int:
+        return self.trace.input_length
+
+    @property
+    def output_length(self) -> int:
+        return self.trace.output_length
+
+    def set_state(self, state: RequestLifecycle) -> None:
+        self.state = state
