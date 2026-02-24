@@ -44,6 +44,16 @@ $ cd ../../
 
 ## How to run
 
+### Mode overview
+
+- `--mode fixed`:
+  - static `(lin, lout, batch)` simulation for one configuration,
+  - output: `output.csv`.
+- `--mode trace`:
+  - trace-driven scheduling using JSONL requests with variable lengths/timestamps,
+  - continuous batching + global KV reuse by `hash_id`,
+  - output: timestamped trace summary/request CSV files.
+
 ### Run GPU simulator 
 ```bash
 $ export PYTHONPATH=$PYTHONPATH:$PWD
@@ -138,8 +148,19 @@ $ python main.py \
 
 Outputs:
 
-- `trace_summary.csv`
-- `trace_requests.csv`
+- `trace_summary_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`
+- `trace_requests_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`
+
+Where:
+
+- `dtype` is inferred from `--pim`: `bank -> BA`, `bg -> BG`, `buffer -> BUFFER`
+- `input_request_name` is the stem of `--trace-file`
+
+Summary energy fields include:
+
+- `prefill_energy_nj`
+- `decode_energy_nj`
+- `total_energy_nj`
 
 Trace record format (single JSONL row):
 
@@ -199,4 +220,3 @@ We reflect the DRAM power constraint to AttAcc by increasing the delay between c
 We calculate these delay with the activation and read energy.
 
 To evaulate AttAcc with no power constraint (NPC), uncomment `preset: HBM3_5.2Gbps_NPC` and comment out `preset: HBM3_5.2Gbps` in yaml config files.
-

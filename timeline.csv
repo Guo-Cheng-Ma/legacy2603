@@ -14,3 +14,4 @@ timestamp,step,status,files,build,notes
 2026-02-23T21:48:21+08:00,C13,completed,src/continuous_scheduler.py|src/trace_simulator.py|main.py,cmake+make pass,added trace debug logs per scheduler/load/cache stages with CLI flags --trace-debug and --trace-debug-interval
 2026-02-24T21:28:29+08:00,C14,completed,main.py,cmake+make pass,trace output names now include mmdd_hhmmss and input request stem
 2026-02-24T21:48:36+08:00,C15,completed,main.py|src/trace_simulator.py|src/continuous_scheduler.py,cmake+make pass,trace filenames now include dtype and summary includes prefill/decode/total energy (nJ)
+2026-02-24T21:53:10+08:00,C16,completed,workflow.md|attacc-README.md,cmake+make pass,documented fixed vs trace mode differences and updated trace output naming/energy fields

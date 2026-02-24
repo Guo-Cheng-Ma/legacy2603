@@ -94,6 +94,20 @@
   - `--mode fixed` (legacy static `(batch, lin, lout)` path),
   - `--mode trace` (continuous batching + trace-driven requests).
 
+### Fixed mode vs Trace mode
+
+- `fixed` mode:
+  - input is scalar `--lin`, `--lout`, `--batch`,
+  - executes one static shape configuration,
+  - no request queue or arrival-time scheduling,
+  - output is `output.csv` (single-run performance/energy breakdown).
+- `trace` mode:
+  - input is JSONL request stream (`--trace-file`),
+  - supports per-request `timestamp`, variable input/output lengths,
+  - uses FIFO waiting queue + continuous batching + immediate backfill,
+  - uses global KV reuse by `hash_id` with LRU eviction,
+  - output is timestamped request/summary CSVs for this run.
+
 ### Trace mode runtime pipeline
 
 1. `src/trace_loader.py` parses JSONL requests and validates required fields.
@@ -123,7 +137,8 @@
 
 ### Trace mode outputs
 
-- `trace_summary.csv`:
-  - aggregate latency/throughput/KV hit metrics.
-- `trace_requests.csv`:
+- `trace_summary_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
+  - aggregate latency/throughput/KV hit metrics,
+  - energy summary (`prefill_energy_nj`, `decode_energy_nj`, `total_energy_nj`).
+- `trace_requests_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
   - per-request arrival/start/TTFT/finish and KV reuse counters.
