@@ -1,6 +1,8 @@
 import argparse
 import csv
 import os
+from datetime import datetime
+from pathlib import Path
 from src.system import *
 from src.type import *
 from src.config import *
@@ -62,6 +64,14 @@ def run(system: System,
                     power_constraint=power_constraint)
     if output_file is not None:
         write_csv(output_file, perfs)
+
+
+def _trace_output_paths(trace_file: str):
+    timestamp = datetime.now().strftime("%m%d_%H%M%S")
+    input_request_name = Path(trace_file).stem
+    summary_name = f"trace_summary_{timestamp}_{input_request_name}.csv"
+    requests_name = f"trace_requests_{timestamp}_{input_request_name}.csv"
+    return summary_name, requests_name
 
 
 def main():
@@ -222,13 +232,16 @@ def main():
             trace_debug_interval=args.trace_debug_interval,
         )
         summary = result['summary']
-        write_trace_outputs(result, summary_path='trace_summary.csv', requests_path='trace_requests.csv')
+        summary_path, requests_path = _trace_output_paths(args.trace_file)
+        write_trace_outputs(result, summary_path=summary_path, requests_path=requests_path)
         print(
-            "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={} outputs=[trace_summary.csv,trace_requests.csv]".format(
+            "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={} outputs=[{},{}]".format(
                 summary['num_requests'],
                 summary['total_time_s'],
                 summary['kv_hit_blocks'],
                 summary['kv_miss_blocks'],
+                summary_path,
+                requests_path,
             )
         )
     else:

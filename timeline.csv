@@ -1,0 +1,15 @@
+timestamp,step,status,files,build,notes
+2026-02-23T20:28:31+08:00,C1,completed,src/request_state.py|src/trace_loader.py,cmake+make pass,added trace schema/loader with hash block validation and deterministic ordering
+2026-02-23T20:32:04+08:00,C2,completed,src/request_state.py|src/continuous_scheduler.py,cmake+make pass,added lifecycle enum and dry-run continuous scheduler skeleton
+2026-02-23T20:33:42+08:00,C3,completed,src/kv_cache.py|src/request_state.py,cmake+make pass,added global KV cache manager with LRU eviction and byte accounting
+2026-02-23T20:35:10+08:00,C4,completed,src/system.py|src/model.py,cmake+make pass,added variable-shape prefill/decode micro-cost APIs while preserving fixed simulate path
+2026-02-23T20:36:26+08:00,C5,completed,src/continuous_scheduler.py|src/kv_cache.py,cmake+make pass,implemented chunked prefill with global KV hash hit reuse and miss insert
+2026-02-23T20:38:22+08:00,C6,completed,src/continuous_scheduler.py|src/request_state.py,cmake+make pass,added token-step decode progression, timing fields, completion, and immediate backfill
+2026-02-23T20:40:55+08:00,C7,completed,src/trace_simulator.py|src/continuous_scheduler.py,cmake+make pass,added end-to-end trace simulator orchestration and completed-request export
+2026-02-23T20:42:18+08:00,C8,completed,main.py|src/trace_simulator.py,cmake+make pass,added trace CLI mode and routing; kept fixed mode path
+2026-02-23T20:43:52+08:00,C9,completed,src/trace_simulator.py|main.py,cmake+make pass,added trace summary/request CSV output writers and CLI integration
+2026-02-23T20:44:50+08:00,C10,completed,src/type.py|src/devices.py|src/system.py,cmake+make pass,added optional KV DMA logical type and latency/energy estimator hooks
+2026-02-23T20:45:53+08:00,C11,completed,workflow.md|attacc-README.md,cmake+make pass,documented trace mode workflow, global KV reuse semantics, and example commands
+2026-02-23T21:20:20+08:00,C12,completed,src/ramulator_wrapper.py,cmake+make pass,fixed trace generator args: pass --maxlen>=--seqlen and removed shell rm usage; validated with GPT-175B trace run showing maxlen==seqlen
+2026-02-23T21:48:21+08:00,C13,completed,src/continuous_scheduler.py|src/trace_simulator.py|main.py,cmake+make pass,added trace debug logs per scheduler/load/cache stages with CLI flags --trace-debug and --trace-debug-interval
+2026-02-24T21:28:29+08:00,C14,completed,main.py,cmake+make pass,trace output names now include mmdd_hhmmss and input request stem
