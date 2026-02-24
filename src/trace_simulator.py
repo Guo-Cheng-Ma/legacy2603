@@ -156,13 +156,15 @@ def run_trace_simulation(
     summary['kv_evictions'] = summary['evictions']
     summary['dma_transfers'] = sum(req['dma_blocks'] for req in request_rows)
     summary['dma_time_s'] = 0.0
+    summary.update(scheduler.energy_snapshot())
     if trace_debug:
         print(
-            "[TRACE][sim] finished total_time_s={:.6f} kv_hit_blocks={} kv_miss_blocks={} kv_evictions={}".format(
+            "[TRACE][sim] finished total_time_s={:.6f} kv_hit_blocks={} kv_miss_blocks={} kv_evictions={} total_energy_nj={:.3f}".format(
                 summary['total_time_s'],
                 summary['kv_hit_blocks'],
                 summary['kv_miss_blocks'],
                 summary['kv_evictions'],
+                summary['total_energy_nj'],
             )
         )
 
@@ -192,6 +194,9 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'kv_evictions',
         'dma_transfers',
         'dma_time_s',
+        'prefill_energy_nj',
+        'decode_energy_nj',
+        'total_energy_nj',
     ]
     with open(summary_path, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=summary_cols)

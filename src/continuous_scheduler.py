@@ -48,6 +48,9 @@ class ContinuousScheduler:
         self.wait_queue: Deque[RequestState] = deque()
         self.active: Dict[int, RequestState] = {}
         self.done: Dict[int, RequestState] = {}
+        # Energy is accumulated in pJ from estimator outputs.
+        self.prefill_energy_pj = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.decode_energy_pj = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -127,6 +130,10 @@ class ContinuousScheduler:
                 effective_tokens = min(missed_blocks * 16, req.input_length)
                 estimate = self.system.estimate_prefill_microbatch(1, max(1, effective_tokens))
                 prefill_latency += estimate['latency']
+                energy = estimate.get("energy", [0, 0, 0, 0, 0, 0])
+                self.prefill_energy_pj = [
+                    self.prefill_energy_pj[i] + float(energy[i]) for i in range(len(self.prefill_energy_pj))
+                ]
 
             if req.prefill_progress_tokens >= req.input_length:
                 req.set_state(RequestLifecycle.DECODING)
@@ -153,6 +160,10 @@ class ContinuousScheduler:
         if self.system is not None:
             estimate = self.system.estimate_decode_step(len(decoding), max_context_len)
             decode_latency = estimate['latency']
+            energy = estimate.get("energy", [0, 0, 0, 0, 0, 0])
+            self.decode_energy_pj = [
+                self.decode_energy_pj[i] + float(energy[i]) for i in range(len(self.decode_energy_pj))
+            ]
         self._log(
             "decode batch={} max_context_len={} est_latency={:.6f}".format(
                 len(decoding),
@@ -244,6 +255,19 @@ class ContinuousScheduler:
 
     def completed_requests(self):
         return [self.done[key] for key in sorted(self.done.keys())]
+
+    def energy_snapshot(self):
+        prefill_total_pj = sum(self.prefill_energy_pj)
+        decode_total_pj = sum(self.decode_energy_pj)
+        total_pj = prefill_total_pj + decode_total_pj
+        return {
+            "prefill_energy_pj": prefill_total_pj,
+            "decode_energy_pj": decode_total_pj,
+            "total_energy_pj": total_pj,
+            "prefill_energy_nj": prefill_total_pj / 1000.0,
+            "decode_energy_nj": decode_total_pj / 1000.0,
+            "total_energy_nj": total_pj / 1000.0,
+        }
 
     def snapshot(self) -> SchedulerSnapshot:
         num_done = len(self.done)

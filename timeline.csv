@@ -13,3 +13,4 @@ timestamp,step,status,files,build,notes
 2026-02-23T21:20:20+08:00,C12,completed,src/ramulator_wrapper.py,cmake+make pass,fixed trace generator args: pass --maxlen>=--seqlen and removed shell rm usage; validated with GPT-175B trace run showing maxlen==seqlen
 2026-02-23T21:48:21+08:00,C13,completed,src/continuous_scheduler.py|src/trace_simulator.py|main.py,cmake+make pass,added trace debug logs per scheduler/load/cache stages with CLI flags --trace-debug and --trace-debug-interval
 2026-02-24T21:28:29+08:00,C14,completed,main.py,cmake+make pass,trace output names now include mmdd_hhmmss and input request stem
+2026-02-24T21:48:36+08:00,C15,completed,main.py|src/trace_simulator.py|src/continuous_scheduler.py,cmake+make pass,trace filenames now include dtype and summary includes prefill/decode/total energy (nJ)

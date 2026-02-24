@@ -66,11 +66,12 @@ def run(system: System,
         write_csv(output_file, perfs)
 
 
-def _trace_output_paths(trace_file: str):
+def _trace_output_paths(trace_file: str, dtype_tag: str):
     timestamp = datetime.now().strftime("%m%d_%H%M%S")
     input_request_name = Path(trace_file).stem
-    summary_name = f"trace_summary_{timestamp}_{input_request_name}.csv"
-    requests_name = f"trace_requests_{timestamp}_{input_request_name}.csv"
+    dtype_tag = str(dtype_tag).upper()
+    summary_name = f"trace_summary_{dtype_tag}_{timestamp}_{input_request_name}.csv"
+    requests_name = f"trace_requests_{dtype_tag}_{timestamp}_{input_request_name}.csv"
     return summary_name, requests_name
 
 
@@ -222,6 +223,12 @@ def main():
         system.set_accelerator(modelinfos, DeviceType.CPU, xpu_config['CPU'])
 
     if args.mode == 'trace':
+        if args.pim == "bg":
+            dtype_tag = "BG"
+        elif args.pim == "buffer":
+            dtype_tag = "BUFFER"
+        else:
+            dtype_tag = "BA"
         result = run_trace_simulation(
             system=system,
             trace_file=args.trace_file,
@@ -232,7 +239,7 @@ def main():
             trace_debug_interval=args.trace_debug_interval,
         )
         summary = result['summary']
-        summary_path, requests_path = _trace_output_paths(args.trace_file)
+        summary_path, requests_path = _trace_output_paths(args.trace_file, dtype_tag)
         write_trace_outputs(result, summary_path=summary_path, requests_path=requests_path)
         print(
             "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={} outputs=[{},{}]".format(
