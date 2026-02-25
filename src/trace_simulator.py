@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from .continuous_scheduler import ContinuousScheduler
-from .config import get_hetero_kv_capacities
+from .config import get_hetero_kv_capacities, load_hetero_kv_arch_config, get_hetero_transfer_bandwidths
 from .kv_cache import KVCacheManager
 from .request_state import RequestState
 from .static_batch_scheduler import StaticBatchScheduler
@@ -27,12 +27,12 @@ def _percentile(values: List[float], ratio: float) -> float:
     return ordered[idx]
 
 
-def _build_kv_cache(system) -> Tuple[KVCacheManager, Dict]:
+def _build_kv_cache(system, kv_arch_cfg: Dict) -> Tuple[KVCacheManager, Dict]:
     a_byte = _activation_bytes(system.model.dtype)
     kv_bytes_per_token = system.model.ndec * 2 * system.model.hdim * a_byte
     kv_bytes_per_block = kv_bytes_per_token * 16
     weight_bytes, _, _ = system.get_required_mem_capacity(batch_size=1, lin=1, lout=1)
-    tier_caps = get_hetero_kv_capacities(weight_bytes_total=weight_bytes)
+    tier_caps = get_hetero_kv_capacities(weight_bytes_total=weight_bytes, hetero_kv_arch=kv_arch_cfg)
 
     cache = KVCacheManager(
         capacity_bytes=max(tier_caps["l1_kv_bytes"], kv_bytes_per_block),
@@ -170,7 +170,7 @@ def run_trace_simulation(
     trace_file: str,
     max_batch_size: int,
     prefill_chunk_tokens: int,
-    kv_hbm_ratio: float,
+    kv_arch_config: str,
     trace_debug: bool = False,
     trace_debug_interval: int = 100,
     pipe_level: bool = False,
@@ -183,13 +183,15 @@ def run_trace_simulation(
 ):
     if trace_debug:
         print(
-            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_hbm_ratio={}".format(
+            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_arch_config={}".format(
                 trace_file,
                 max_batch_size,
                 prefill_chunk_tokens,
-                kv_hbm_ratio,
+                kv_arch_config,
             )
         )
+    kv_arch_cfg = load_hetero_kv_arch_config(kv_arch_config)
+    bw_cfg = get_hetero_transfer_bandwidths(kv_arch_cfg)
     requests = load_request_states(trace_file)
     if trace_debug:
         first_ts = requests[0].timestamp if requests else 0.0
@@ -201,7 +203,7 @@ def run_trace_simulation(
                 last_ts,
             )
         )
-    kv_cache, kv_caps = _build_kv_cache(system)
+    kv_cache, kv_caps = _build_kv_cache(system, kv_arch_cfg)
     if trace_debug:
         kv_info = kv_cache.snapshot()
         print(
@@ -213,10 +215,13 @@ def run_trace_simulation(
                 kv_caps["weight_bytes_total"],
             )
         )
-        if kv_hbm_ratio is not None:
-            print(
-                "[TRACE][sim] note: --kv-hbm-ratio is deprecated and ignored in 3-tier capacity mode"
+        print(
+            "[TRACE][sim] kv arch cards={} dma_bw_bps={} pcie_bw_bps={}".format(
+                kv_arch_cfg["NUM_CARDS"],
+                bw_cfg["dma_bw_bps"],
+                bw_cfg["pcie_bw_bps"],
             )
+        )
 
     if trace_scheduler == "continuous":
         scheduler = ContinuousScheduler(
@@ -229,6 +234,7 @@ def run_trace_simulation(
             parallel_ff=is_parallel,
             debug=trace_debug,
             debug_interval=trace_debug_interval,
+            kv_arch_cfg=kv_arch_cfg,
         )
     elif trace_scheduler == "static":
         scheduler = StaticBatchScheduler(
@@ -240,6 +246,7 @@ def run_trace_simulation(
             parallel_ff=is_parallel,
             debug=trace_debug,
             debug_interval=trace_debug_interval,
+            kv_arch_cfg=kv_arch_cfg,
         )
     else:
         raise ValueError(f"unsupported trace_scheduler: {trace_scheduler}")
@@ -303,7 +310,10 @@ def run_trace_simulation(
     summary['max_batch_size'] = int(max_batch_size)
     summary['prefill_chunk_tokens'] = int(prefill_chunk_tokens)
     summary['kv_capacity_mode'] = "hetero_3tier"
-    summary['kv_hbm_ratio_deprecated'] = float(kv_hbm_ratio)
+    summary['kv_arch_config'] = kv_arch_config
+    summary['num_cards_cfg'] = kv_arch_cfg["NUM_CARDS"]
+    summary['dma_bw_bps_cfg'] = bw_cfg["dma_bw_bps"]
+    summary['pcie_bw_bps_cfg'] = bw_cfg["pcie_bw_bps"]
     summary['weight_reserved_bytes'] = kv_caps["weight_bytes_total"]
     summary['l1_kv_capacity_bytes_cfg'] = kv_caps["l1_kv_bytes"]
     summary['l2_total_bytes_cfg'] = kv_caps["l2_total_bytes"]
@@ -408,7 +418,10 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'decode_padded_tokens',
         'prefill_chunk_tokens',
         'kv_capacity_mode',
-        'kv_hbm_ratio_deprecated',
+        'kv_arch_config',
+        'num_cards_cfg',
+        'dma_bw_bps_cfg',
+        'pcie_bw_bps_cfg',
         'weight_reserved_bytes',
         'l1_kv_capacity_bytes_cfg',
         'l2_total_bytes_cfg',
@@ -578,7 +591,7 @@ def run_trace_mode(system, args):
         trace_file=args.trace_file,
         max_batch_size=args.max_batch_size,
         prefill_chunk_tokens=args.prefill_chunk_tokens,
-        kv_hbm_ratio=args.kv_hbm_ratio,
+        kv_arch_config=args.kv_arch_config,
         trace_debug=args.trace_debug,
         trace_debug_interval=args.trace_debug_interval,
         pipe_level=args.pipeopt,

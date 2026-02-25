@@ -161,10 +161,10 @@ def main():
                         type=int,
                         default=128,
                         help="chunk size for prefill micro-step in trace mode")
-    parser.add_argument("--kv-hbm-ratio",
-                        type=float,
-                        default=0.3,
-                        help="deprecated in 3-tier mode; kept only for backward-compatible CLI")
+    parser.add_argument("--kv-arch-config",
+                        type=str,
+                        default='configs/kv_arch.yaml',
+                        help="YAML file for 3-tier KV architecture/capacity/bandwidth settings")
     parser.add_argument("--trace-debug",
                         action='store_true',
                         help="enable detailed trace-mode debug logs")
@@ -228,7 +228,6 @@ def main():
         system.set_accelerator(modelinfos, DeviceType.CPU, xpu_config['CPU'])
 
     if args.mode == 'trace':
-        print("Note: --kv-hbm-ratio is deprecated and ignored in hetero 3-tier KV mode.")
         if args.pim == "bg":
             dtype_tag = "BG"
         elif args.pim == "buffer":
@@ -240,7 +239,7 @@ def main():
             trace_file=args.trace_file,
             max_batch_size=args.max_batch_size,
             prefill_chunk_tokens=args.prefill_chunk_tokens,
-            kv_hbm_ratio=args.kv_hbm_ratio,
+            kv_arch_config=args.kv_arch_config,
             trace_debug=args.trace_debug,
             trace_debug_interval=args.trace_debug_interval,
             pipe_level=args.pipeopt,

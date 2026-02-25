@@ -153,7 +153,7 @@
 ### Trace mode outputs
 
 - `trace_summary_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
-  - run metadata (system/gpu/pim/model/dtype, capacity ratio, scheduler knobs),
+  - run metadata (system/gpu/pim/model/dtype, scheduler knobs),
   - aggregate latency/TTFT/queue/throughput metrics,
   - input/output token distribution stats (avg/p50/p95/max),
   - KV cache and eviction stats,
@@ -201,27 +201,36 @@ Interpretation:
 
 ## 6) Heterogeneous 3-tier KV architecture constants
 
-The simulator now includes explicit architecture constants in `src/config.py`
-for the upcoming three-tier KV manager work:
+The simulator reads 3-tier KV architecture settings from YAML:
 
-- 8 cards total.
-- Per-card memory split:
-  - L1 Hi-speed KV tier: 20 GB.
-  - L2 Hi-capacity tier: 40 GB (weights + KV).
-- Global host KV tier (L3): 512 GB.
-- L1<->L2 migration bandwidth: `0.5 * HBM BW`.
-- Host transfer bandwidth: PCIe 4.0 x16 constant.
+- default file: `configs/kv_arch.yaml`
+- CLI argument: `--kv-arch-config <path>`
 
 Capacity formulas:
 
-- `l1_kv_bytes = 8 * 20GB`
-- `l2_total_bytes = 8 * 40GB`
+- `l1_kv_bytes = num_cards * hispeed_kv_per_card_gb`
+- `l2_total_bytes = num_cards * hicap_total_per_card_gb`
 - `l2_kv_bytes = max(0, l2_total_bytes - weight_bytes_total)`
-- `l3_kv_bytes = 512GB`
+- `l3_kv_bytes = host_kv_total_gb`
 
 Helper API:
 
-- `get_hetero_kv_capacities(weight_bytes_total)` in `src/config.py`.
+- `load_hetero_kv_arch_config(yaml_path)` in `src/config.py`
+- `get_hetero_kv_capacities(weight_bytes_total, hetero_kv_arch=...)` in `src/config.py`
+- `get_hetero_transfer_bandwidths(hetero_kv_arch=...)` in `src/config.py`
+
+Example YAML:
+
+```yaml
+kv_arch:
+  num_cards: 8
+  gpu_mem_per_card_gb: 60
+  hispeed_kv_per_card_gb: 20
+  hicap_total_per_card_gb: 40
+  host_kv_total_gb: 512
+  dma_bandwidth_gbps: 1676
+  pcie_bandwidth_gbps: 64
+```
 
 ## 7) Validation checklist (C32)
 

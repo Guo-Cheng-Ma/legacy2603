@@ -1,21 +1,20 @@
 from src.type import *
+import copy
 
 SCALING_FACTOR = {}
 SCALING_FACTOR['MAX_COMPUTE_UTIL'] = 0.8
 SCALING_FACTOR['MAX_OFF_MEM_BW_UTIL'] = 0.85
 
-# Heterogeneous 3-tier KV cache architecture constants.
-# Units:
-# - *_GB values use binary GiB conversion in helper APIs.
-# - *_BPS values are bytes/second.
-HETERO_KV_ARCH = {
+# Heterogeneous 3-tier KV cache architecture defaults.
+# Prefer providing these via YAML in trace mode (`--kv-arch-config`).
+DEFAULT_HETERO_KV_ARCH = {
     "NUM_CARDS": 8,
     "GPU_MEM_PER_CARD_GB": 60,
     "HISPEED_KV_PER_CARD_GB": 20,  # L1 (compute layers)
     "HICAP_TOTAL_PER_CARD_GB": 40,  # L2 (weights + KV)
     "HOST_KV_TOTAL_GB": 512,  # L3 host spill tier
-    "DMA_BW_RATIO_TO_HBM": 0.5,  # L1<->L2 migration bandwidth scale
-    "PCIE4_X16_BW_BPS": 64 * 1000 * 1000 * 1000,  # keep consistent with InterfaceType.PCIE4
+    "DMA_BW_BPS": 1676 * 1000 * 1000 * 1000,  # default: 0.5 * A100 HBM3 BW
+    "PCIE_BW_BPS": 64 * 1000 * 1000 * 1000,  # PCIe 4.0 x16
 }
 
 
@@ -23,16 +22,123 @@ def gib_to_bytes(gib: float) -> int:
     return int(float(gib) * 1024 * 1024 * 1024)
 
 
-def get_hetero_kv_capacities(weight_bytes_total: int = 0) -> dict:
+def _required_numeric(cfg, key):
+    if key not in cfg:
+        raise ValueError(f"missing key in kv arch config: {key}")
+    try:
+        value = float(cfg[key])
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid numeric value for {key}: {cfg[key]}")
+    if value <= 0:
+        raise ValueError(f"{key} must be > 0, got {value}")
+    return value
+
+
+def _parse_simple_yaml_map(yaml_text: str) -> dict:
+    """
+    Minimal YAML parser for this project config format.
+    Supports flat key:value pairs and one top-level nested map (e.g., kv_arch:).
+    """
+    root = {}
+    section = None
+    for raw in yaml_text.splitlines():
+        line = raw.split('#', 1)[0].rstrip()
+        if not line.strip():
+            continue
+
+        if not raw.startswith(' ') and line.endswith(':'):
+            section = line[:-1].strip()
+            root.setdefault(section, {})
+            continue
+
+        if ':' not in line:
+            continue
+
+        key, value = line.split(':', 1)
+        key = key.strip()
+        value = value.strip()
+        if value == "":
+            continue
+
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            parsed = value[1:-1]
+        else:
+            try:
+                parsed = int(value)
+            except ValueError:
+                try:
+                    parsed = float(value)
+                except ValueError:
+                    parsed = value
+
+        target = root[section] if raw.startswith(' ') and section else root
+        target[key] = parsed
+    return root
+
+
+def load_hetero_kv_arch_config(yaml_path: str = None) -> dict:
+    """Load heterogeneous KV architecture config from YAML with defaults."""
+    cfg = copy.deepcopy(DEFAULT_HETERO_KV_ARCH)
+    if yaml_path is None:
+        return cfg
+
+    with open(yaml_path, 'r', encoding='utf-8') as handle:
+        text = handle.read()
+
+    try:
+        import yaml
+        parsed = yaml.safe_load(text) or {}
+    except ImportError:
+        parsed = _parse_simple_yaml_map(text)
+
+    root = parsed.get("kv_arch", parsed)
+    if not isinstance(root, dict):
+        raise ValueError("kv arch YAML must be a map or contain a `kv_arch` map")
+
+    normalized = {
+        "NUM_CARDS": root.get("num_cards", cfg["NUM_CARDS"]),
+        "GPU_MEM_PER_CARD_GB": root.get("gpu_mem_per_card_gb", cfg["GPU_MEM_PER_CARD_GB"]),
+        "HISPEED_KV_PER_CARD_GB": root.get("hispeed_kv_per_card_gb", cfg["HISPEED_KV_PER_CARD_GB"]),
+        "HICAP_TOTAL_PER_CARD_GB": root.get("hicap_total_per_card_gb", cfg["HICAP_TOTAL_PER_CARD_GB"]),
+        "HOST_KV_TOTAL_GB": root.get("host_kv_total_gb", cfg["HOST_KV_TOTAL_GB"]),
+        "DMA_BW_BPS": root.get("dma_bandwidth_gbps", cfg["DMA_BW_BPS"] / 1e9) * 1e9,
+        "PCIE_BW_BPS": root.get("pcie_bandwidth_gbps", cfg["PCIE_BW_BPS"] / 1e9) * 1e9,
+    }
+
+    # Validate required numeric values.
+    validated = {
+        "NUM_CARDS": int(_required_numeric(normalized, "NUM_CARDS")),
+        "GPU_MEM_PER_CARD_GB": _required_numeric(normalized, "GPU_MEM_PER_CARD_GB"),
+        "HISPEED_KV_PER_CARD_GB": _required_numeric(normalized, "HISPEED_KV_PER_CARD_GB"),
+        "HICAP_TOTAL_PER_CARD_GB": _required_numeric(normalized, "HICAP_TOTAL_PER_CARD_GB"),
+        "HOST_KV_TOTAL_GB": _required_numeric(normalized, "HOST_KV_TOTAL_GB"),
+        "DMA_BW_BPS": _required_numeric(normalized, "DMA_BW_BPS"),
+        "PCIE_BW_BPS": _required_numeric(normalized, "PCIE_BW_BPS"),
+    }
+    return validated
+
+
+def get_hetero_transfer_bandwidths(hetero_kv_arch: dict = None) -> dict:
+    cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
+    return {
+        "dma_bw_bps": float(cfg["DMA_BW_BPS"]),
+        "pcie_bw_bps": float(cfg["PCIE_BW_BPS"]),
+    }
+
+
+def get_hetero_kv_capacities(weight_bytes_total: int = 0, hetero_kv_arch: dict = None) -> dict:
     """Return architecture-derived global KV capacities for L1/L2/L3 tiers."""
-    num_cards = int(HETERO_KV_ARCH["NUM_CARDS"])
+    cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
+    num_cards = int(cfg["NUM_CARDS"])
     l1_total = gib_to_bytes(
-        HETERO_KV_ARCH["HISPEED_KV_PER_CARD_GB"] * num_cards
+        cfg["HISPEED_KV_PER_CARD_GB"] * num_cards
     )
     l2_total = gib_to_bytes(
-        HETERO_KV_ARCH["HICAP_TOTAL_PER_CARD_GB"] * num_cards
+        cfg["HICAP_TOTAL_PER_CARD_GB"] * num_cards
     )
-    l3_total = gib_to_bytes(HETERO_KV_ARCH["HOST_KV_TOTAL_GB"])
+    l3_total = gib_to_bytes(cfg["HOST_KV_TOTAL_GB"])
 
     weight_bytes = max(0, int(weight_bytes_total))
     l2_kv = max(0, l2_total - weight_bytes)

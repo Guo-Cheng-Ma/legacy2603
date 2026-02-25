@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional
 
 from .kv_cache import KVCacheManager
-from .config import HETERO_KV_ARCH
+from .config import get_hetero_transfer_bandwidths
 from .request_state import RequestLifecycle, RequestState
 
 
@@ -31,6 +31,7 @@ class ContinuousScheduler:
         parallel_ff: bool = False,
         debug: bool = False,
         debug_interval: int = 100,
+        kv_arch_cfg: Optional[dict] = None,
     ):
         if max_batch_size <= 0:
             raise ValueError("max_batch_size must be > 0")
@@ -47,6 +48,7 @@ class ContinuousScheduler:
         self.debug = debug
         self.debug_interval = max(1, int(debug_interval))
         self.step_count = 0
+        self.transfer_bw = get_hetero_transfer_bandwidths(kv_arch_cfg)
 
         self.sim_time = 0.0
         self.arrival_idx = 0
@@ -179,7 +181,7 @@ class ContinuousScheduler:
                     dma_bytes = dma_blocks * self.kv_cache.kv_bytes_per_block
                     dma_est = self.system.estimate_kv_dma(
                         dma_bytes,
-                        bw_bps=self.system.devices['GPU'].peak_memory_bandwidth * HETERO_KV_ARCH["DMA_BW_RATIO_TO_HBM"],
+                        bw_bps=self.transfer_bw["dma_bw_bps"],
                     )
                     prefill_latency += dma_est['latency']
                     self.migration_time_s += dma_est['latency']
@@ -192,7 +194,7 @@ class ContinuousScheduler:
                     pcie_bytes = pcie_blocks * self.kv_cache.kv_bytes_per_block
                     pcie_est = self.system.estimate_kv_pcie(
                         pcie_bytes,
-                        bw_bps=HETERO_KV_ARCH["PCIE4_X16_BW_BPS"],
+                        bw_bps=self.transfer_bw["pcie_bw_bps"],
                     )
                     prefill_latency += pcie_est['latency']
                     self.migration_time_s += pcie_est['latency']

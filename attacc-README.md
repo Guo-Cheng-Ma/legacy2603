@@ -142,11 +142,28 @@ $ python main.py \
   --pim bank \
   --trace-file llm-req-inputs/qwen_thinking_blksz_16.jsonl \
   --max-batch-size 16 \
-  --prefill-chunk-tokens 128
+  --prefill-chunk-tokens 128 \
+  --kv-arch-config configs/kv_arch.yaml
 ```
 
-`--kv-hbm-ratio` is deprecated in trace mode and ignored (capacity is now
-derived from the heterogeneous 3-tier architecture).
+`configs/kv_arch.yaml` controls:
+- card count
+- L1/L2/L3 KV capacities
+- DMA bandwidth
+- PCIe bandwidth
+
+Example `configs/kv_arch.yaml`:
+
+```yaml
+kv_arch:
+  num_cards: 8
+  gpu_mem_per_card_gb: 60
+  hispeed_kv_per_card_gb: 20
+  hicap_total_per_card_gb: 40
+  host_kv_total_gb: 512
+  dma_bandwidth_gbps: 1676
+  pcie_bandwidth_gbps: 64
+```
 
 Outputs:
 
