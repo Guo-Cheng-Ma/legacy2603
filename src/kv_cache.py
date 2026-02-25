@@ -24,12 +24,49 @@ class KVTier(str, Enum):
     L3 = "L3"
 
 
+@dataclass
+class KVAccessResult:
+    is_hit: bool = False
+    hit_tier: Optional[KVTier] = None
+    inserted: bool = False
+    promoted_from_l2: int = 0
+    promoted_from_l3: int = 0
+    l1_to_l2: int = 0
+    l2_to_l3: int = 0
+    l3_drops: int = 0
+
+    @property
+    def l1_hit(self) -> int:
+        return 1 if self.hit_tier == KVTier.L1 else 0
+
+    @property
+    def l2_hit(self) -> int:
+        return 1 if self.hit_tier == KVTier.L2 else 0
+
+    @property
+    def l3_hit(self) -> int:
+        return 1 if self.hit_tier == KVTier.L3 else 0
+
+    @property
+    def dma_blocks(self) -> int:
+        # L1<->L2 movement.
+        return self.l1_to_l2 + self.promoted_from_l2
+
+    @property
+    def pcie_blocks(self) -> int:
+        # L2<->L3 and L3->L1 movement.
+        return self.l2_to_l3 + self.promoted_from_l3
+
+    @property
+    def migration_blocks(self) -> int:
+        return self.dma_blocks + self.pcie_blocks
+
+
 class KVCacheManager:
     """
-    Global hash-id KV cache with byte-capacity accounting and per-tier LRU tables.
+    Global hash-id KV cache with 3-tier LRU state.
 
-    C25 keeps APIs compatible with existing single-pool behavior. Runtime transition
-    policies are integrated in later commits.
+    `access(hash_id)` applies tier transitions and always tries to leave the block in L1.
     """
 
     def __init__(
@@ -83,13 +120,99 @@ class KVCacheManager:
     def tier_capacity_bytes(self, tier: KVTier) -> int:
         return self._capacity[tier]
 
+    def _pop_lru(self, tier: KVTier) -> Optional[int]:
+        entries = self._tiers[tier]
+        if not entries:
+            return None
+        hash_id, _ = entries.popitem(last=False)
+        self._used[tier] -= self.kv_bytes_per_block
+        return hash_id
+
+    def _remove_if_exists(self, hash_id: int, tier: KVTier) -> bool:
+        entries = self._tiers[tier]
+        if hash_id not in entries:
+            return False
+        del entries[hash_id]
+        self._used[tier] -= self.kv_bytes_per_block
+        return True
+
     def locate(self, hash_id: int) -> Optional[KVTier]:
         for tier in [KVTier.L1, KVTier.L2, KVTier.L3]:
             if hash_id in self._tiers[tier]:
                 return tier
         return None
 
+    def _place_in_l3(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
+        cap = self._capacity[KVTier.L3]
+        if cap < self.kv_bytes_per_block:
+            self.stats.evictions += 1
+            self.stats.l3_drops += 1
+            if result is not None:
+                result.l3_drops += 1
+            return False
+
+        while self._used[KVTier.L3] + self.kv_bytes_per_block > cap:
+            victim = self._pop_lru(KVTier.L3)
+            if victim is None:
+                break
+            self.stats.evictions += 1
+            self.stats.l3_drops += 1
+            if result is not None:
+                result.l3_drops += 1
+
+        if self._used[KVTier.L3] + self.kv_bytes_per_block > cap:
+            return False
+
+        self._tiers[KVTier.L3][hash_id] = True
+        self._used[KVTier.L3] += self.kv_bytes_per_block
+        return True
+
+    def _place_in_l2(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
+        cap = self._capacity[KVTier.L2]
+        if cap < self.kv_bytes_per_block:
+            return self._place_in_l3(hash_id, result=result)
+
+        while self._used[KVTier.L2] + self.kv_bytes_per_block > cap:
+            victim = self._pop_lru(KVTier.L2)
+            if victim is None:
+                break
+            self.stats.evictions += 1
+            self.stats.l2_to_l3 += 1
+            if result is not None:
+                result.l2_to_l3 += 1
+            self._place_in_l3(victim, result=result)
+
+        if self._used[KVTier.L2] + self.kv_bytes_per_block > cap:
+            return self._place_in_l3(hash_id, result=result)
+
+        self._tiers[KVTier.L2][hash_id] = True
+        self._used[KVTier.L2] += self.kv_bytes_per_block
+        return True
+
+    def _place_in_l1(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
+        cap = self._capacity[KVTier.L1]
+        if cap < self.kv_bytes_per_block:
+            return False
+
+        while self._used[KVTier.L1] + self.kv_bytes_per_block > cap:
+            victim = self._pop_lru(KVTier.L1)
+            if victim is None:
+                break
+            self.stats.evictions += 1
+            self.stats.l1_to_l2 += 1
+            if result is not None:
+                result.l1_to_l2 += 1
+            self._place_in_l2(victim, result=result)
+
+        if self._used[KVTier.L1] + self.kv_bytes_per_block > cap:
+            return False
+
+        self._tiers[KVTier.L1][hash_id] = True
+        self._used[KVTier.L1] += self.kv_bytes_per_block
+        return True
+
     def probe(self, hash_id: int) -> bool:
+        """Compatibility API: hit test without tier promotions."""
         tier = self.locate(hash_id)
         if tier is not None:
             self.stats.hits += 1
@@ -104,6 +227,53 @@ class KVCacheManager:
         self.stats.misses += 1
         return False
 
+    def access(self, hash_id: int) -> KVAccessResult:
+        """
+        Main API for continuous scheduler.
+        - hit in L1: reuse directly.
+        - hit in L2/L3: promote to L1 and apply cascading evictions.
+        - miss: insert as newly computed block into L1.
+        """
+        result = KVAccessResult()
+        tier = self.locate(hash_id)
+        if tier == KVTier.L1:
+            self.stats.hits += 1
+            self.stats.l1_hits += 1
+            result.is_hit = True
+            result.hit_tier = KVTier.L1
+            self._tiers[KVTier.L1].move_to_end(hash_id)
+            return result
+
+        if tier == KVTier.L2:
+            self.stats.hits += 1
+            self.stats.l2_hits += 1
+            result.is_hit = True
+            result.hit_tier = KVTier.L2
+            self._remove_if_exists(hash_id, KVTier.L2)
+            if self._place_in_l1(hash_id, result=result):
+                result.promoted_from_l2 = 1
+            else:
+                self._place_in_l2(hash_id, result=result)
+            return result
+
+        if tier == KVTier.L3:
+            self.stats.hits += 1
+            self.stats.l3_hits += 1
+            result.is_hit = True
+            result.hit_tier = KVTier.L3
+            self._remove_if_exists(hash_id, KVTier.L3)
+            if self._place_in_l1(hash_id, result=result):
+                result.promoted_from_l3 = 1
+            else:
+                self._place_in_l3(hash_id, result=result)
+            return result
+
+        self.stats.misses += 1
+        if self._place_in_l1(hash_id, result=result):
+            self.stats.inserts += 1
+            result.inserted = True
+        return result
+
     def touch(self, hash_id: int) -> bool:
         tier = self.locate(hash_id)
         if tier is None:
@@ -115,39 +285,45 @@ class KVCacheManager:
         return self.locate(hash_id) is not None
 
     def reserve_or_evict(self, required_bytes: int, tier: KVTier = KVTier.L1) -> int:
-        """Evict within one tier until required bytes can be allocated. Returns evicted count."""
+        """Compatibility API used by legacy code paths."""
         if required_bytes <= 0:
             return 0
         if required_bytes > self._capacity[tier]:
             return -1
 
         evicted = 0
-        entries = self._tiers[tier]
-        while self._used[tier] + required_bytes > self._capacity[tier] and entries:
-            _, _ = entries.popitem(last=False)
-            self._used[tier] -= self.kv_bytes_per_block
+        while self._used[tier] + required_bytes > self._capacity[tier]:
+            victim = self._pop_lru(tier)
+            if victim is None:
+                break
             self.stats.evictions += 1
             if tier == KVTier.L3:
                 self.stats.l3_drops += 1
             evicted += 1
+
         if self._used[tier] + required_bytes > self._capacity[tier]:
             return -1
         return evicted
 
     def insert(self, hash_id: int, tier: KVTier = KVTier.L1) -> bool:
+        """Compatibility API: explicit placement by tier."""
         current_tier = self.locate(hash_id)
         if current_tier is not None:
             self._tiers[current_tier].move_to_end(hash_id)
             return True
 
-        result = self.reserve_or_evict(self.kv_bytes_per_block, tier=tier)
-        if result < 0:
-            return False
+        result = KVAccessResult()
+        ok = False
+        if tier == KVTier.L1:
+            ok = self._place_in_l1(hash_id, result=result)
+        elif tier == KVTier.L2:
+            ok = self._place_in_l2(hash_id, result=result)
+        else:
+            ok = self._place_in_l3(hash_id, result=result)
 
-        self._tiers[tier][hash_id] = True
-        self._used[tier] += self.kv_bytes_per_block
-        self.stats.inserts += 1
-        return True
+        if ok:
+            self.stats.inserts += 1
+        return ok
 
     def snapshot(self) -> dict:
         return {

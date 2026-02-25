@@ -120,17 +120,42 @@ class ContinuousScheduler:
 
             missed_blocks = 0
             hit_blocks = 0
+            l1_hit_blocks = 0
+            l2_hit_blocks = 0
+            l3_hit_blocks = 0
+            l1_to_l2_moves = 0
+            l2_to_l3_moves = 0
+            l3_drop_blocks = 0
             for block_idx in block_indices:
                 hash_id = req.trace.hash_ids[block_idx]
-                hit = self.kv_cache.probe(hash_id) if self.kv_cache is not None else False
-                if hit:
+                if self.kv_cache is None:
+                    missed_blocks += 1
+                    req.computed_blocks += 1
+                    continue
+
+                access = self.kv_cache.access(hash_id)
+                req.l1_hit_blocks += access.l1_hit
+                req.l2_hit_blocks += access.l2_hit
+                req.l3_hit_blocks += access.l3_hit
+                req.l1_to_l2_blocks += access.l1_to_l2
+                req.l2_to_l3_blocks += access.l2_to_l3
+                req.l3_drop_blocks += access.l3_drops
+                req.dma_blocks += access.dma_blocks
+                req.migration_bytes += access.migration_blocks * self.kv_cache.kv_bytes_per_block
+
+                l1_hit_blocks += access.l1_hit
+                l2_hit_blocks += access.l2_hit
+                l3_hit_blocks += access.l3_hit
+                l1_to_l2_moves += access.l1_to_l2
+                l2_to_l3_moves += access.l2_to_l3
+                l3_drop_blocks += access.l3_drops
+
+                if access.is_hit:
                     req.reused_blocks += 1
                     hit_blocks += 1
                 else:
                     missed_blocks += 1
                     req.computed_blocks += 1
-                    if self.kv_cache is not None:
-                        self.kv_cache.insert(hash_id)
 
             chunk_end = min(req.input_length, req.prefill_progress_tokens + self.prefill_chunk_tokens)
             req.prefill_progress_tokens = chunk_end
@@ -147,11 +172,17 @@ class ContinuousScheduler:
             if req.prefill_progress_tokens >= req.input_length:
                 req.set_state(RequestLifecycle.DECODING)
             self._log(
-                "prefill req={} chunk_blocks={} hit={} miss={} progress={}/{}".format(
+                "prefill req={} chunk_blocks={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] progress={}/{}".format(
                     req.req_id,
                     len(block_indices),
                     hit_blocks,
                     missed_blocks,
+                    l1_hit_blocks,
+                    l2_hit_blocks,
+                    l3_hit_blocks,
+                    l1_to_l2_moves,
+                    l2_to_l3_moves,
+                    l3_drop_blocks,
                     req.prefill_progress_tokens,
                     req.input_length,
                 )
