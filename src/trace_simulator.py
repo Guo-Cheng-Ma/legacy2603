@@ -179,6 +179,7 @@ def run_trace_simulation(
     system_name: str = "",
     gpu_name: str = "",
     pim_type: str = "",
+    trace_scheduler: str = "continuous",
 ):
     if trace_debug:
         print(
@@ -210,17 +211,20 @@ def run_trace_simulation(
             )
         )
 
-    scheduler = ContinuousScheduler(
-        requests=requests,
-        max_batch_size=max_batch_size,
-        system=system,
-        kv_cache=kv_cache,
-        prefill_chunk_tokens=prefill_chunk_tokens,
-        pipe_level=pipe_level,
-        parallel_ff=is_parallel,
-        debug=trace_debug,
-        debug_interval=trace_debug_interval,
-    )
+    if trace_scheduler == "continuous":
+        scheduler = ContinuousScheduler(
+            requests=requests,
+            max_batch_size=max_batch_size,
+            system=system,
+            kv_cache=kv_cache,
+            prefill_chunk_tokens=prefill_chunk_tokens,
+            pipe_level=pipe_level,
+            parallel_ff=is_parallel,
+            debug=trace_debug,
+            debug_interval=trace_debug_interval,
+        )
+    else:
+        raise ValueError(f"unsupported trace_scheduler: {trace_scheduler}")
 
     if requests and requests[0].timestamp > 0:
         scheduler.sim_time = requests[0].timestamp
@@ -257,6 +261,7 @@ def run_trace_simulation(
     summary.update(_collect_system_metadata(system, completed, max_batch_size))
     summary.update(kv_cache.snapshot())
     summary['mode'] = "trace"
+    summary['trace_scheduler_mode'] = trace_scheduler
     summary['trace_file'] = trace_file
     summary['input_request_name'] = Path(trace_file).stem
     summary['system'] = system_name

@@ -172,6 +172,11 @@ def main():
                         type=int,
                         default=100,
                         help="print scheduler summary every N trace steps")
+    parser.add_argument("--trace-scheduler",
+                        type=str,
+                        default='continuous',
+                        choices=['continuous', 'static'],
+                        help="trace scheduler policy: continuous backfill or static batching")
 
     args = parser.parse_args()
 
@@ -243,6 +248,7 @@ def main():
             system_name=args.system,
             gpu_name=args.gpu,
             pim_type=args.pim,
+            trace_scheduler=args.trace_scheduler,
         )
         summary = result['summary']
         summary_path, requests_path = _trace_output_paths(args.trace_file, dtype_tag)
