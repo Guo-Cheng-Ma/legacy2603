@@ -71,7 +71,13 @@ class ContinuousScheduler:
         self.pcie_energy_nj = 0.0
         self.dma_transfer_blocks = 0
         self.pcie_transfer_blocks = 0
+        self.callback_dma_transfer_blocks = 0
+        self.callback_pcie_transfer_blocks = 0
+        self.eviction_dma_transfer_blocks = 0
+        self.eviction_pcie_transfer_blocks = 0
         self.migration_bytes = 0
+        self.callback_migration_time_s = 0.0
+        self.overlapped_eviction_time_s = 0.0
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -138,8 +144,10 @@ class ContinuousScheduler:
             l1_to_l2_moves = 0
             l2_to_l3_moves = 0
             l3_drop_blocks = 0
-            dma_blocks = 0
-            pcie_blocks = 0
+            callback_dma_blocks = 0
+            callback_pcie_blocks = 0
+            eviction_dma_blocks = 0
+            eviction_pcie_blocks = 0
             for block_idx in block_indices:
                 hash_id = req.trace.hash_ids[block_idx]
                 if self.kv_cache is None:
@@ -190,8 +198,10 @@ class ContinuousScheduler:
                 l1_to_l2_moves += access.l1_to_l2
                 l2_to_l3_moves += access.l2_to_l3
                 l3_drop_blocks += access.l3_drops
-                dma_blocks += access.dma_blocks
-                pcie_blocks += access.pcie_blocks
+                callback_dma_blocks += access.promoted_from_l2
+                callback_pcie_blocks += access.promoted_from_l3
+                eviction_dma_blocks += access.l1_to_l2
+                eviction_pcie_blocks += access.l2_to_l3
 
                 if access.is_hit:
                     req.reused_blocks += 1
@@ -204,32 +214,64 @@ class ContinuousScheduler:
             req.prefill_progress_tokens = chunk_end
 
             if self.system is not None and self.kv_cache is not None:
-                if dma_blocks > 0:
-                    dma_bytes = dma_blocks * self.kv_cache.kv_bytes_per_block
-                    dma_est = self.system.estimate_kv_dma(
-                        dma_bytes,
+                if callback_dma_blocks > 0:
+                    callback_dma_bytes = callback_dma_blocks * self.kv_cache.kv_bytes_per_block
+                    callback_dma_est = self.system.estimate_kv_dma(
+                        callback_dma_bytes,
                         bw_bps=self.transfer_bw["dma_bw_bps"],
                     )
-                    prefill_latency += dma_est['latency']
-                    self.migration_time_s += dma_est['latency']
-                    self.dma_time_s += dma_est['latency']
-                    self.migration_energy_nj += dma_est['energy_nj']
-                    self.dma_energy_nj += dma_est['energy_nj']
-                    self.dma_transfer_blocks += dma_blocks
-                    self.migration_bytes += dma_bytes
-                if pcie_blocks > 0:
-                    pcie_bytes = pcie_blocks * self.kv_cache.kv_bytes_per_block
-                    pcie_est = self.system.estimate_kv_pcie(
-                        pcie_bytes,
+                    # Callback transfer latency (L2->L1) is non-overlapped penalty.
+                    prefill_latency += callback_dma_est['latency']
+                    self.migration_time_s += callback_dma_est['latency']
+                    self.callback_migration_time_s += callback_dma_est['latency']
+                    self.dma_time_s += callback_dma_est['latency']
+                    self.migration_energy_nj += callback_dma_est['energy_nj']
+                    self.dma_energy_nj += callback_dma_est['energy_nj']
+                    self.dma_transfer_blocks += callback_dma_blocks
+                    self.callback_dma_transfer_blocks += callback_dma_blocks
+                    self.migration_bytes += callback_dma_bytes
+                if eviction_dma_blocks > 0:
+                    eviction_dma_bytes = eviction_dma_blocks * self.kv_cache.kv_bytes_per_block
+                    eviction_dma_est = self.system.estimate_kv_dma(
+                        eviction_dma_bytes,
+                        bw_bps=self.transfer_bw["dma_bw_bps"],
+                    )
+                    # Eviction transfer latency (L1->L2) is fully overlapped by policy.
+                    self.overlapped_eviction_time_s += eviction_dma_est['latency']
+                    self.migration_energy_nj += eviction_dma_est['energy_nj']
+                    self.dma_energy_nj += eviction_dma_est['energy_nj']
+                    self.dma_transfer_blocks += eviction_dma_blocks
+                    self.eviction_dma_transfer_blocks += eviction_dma_blocks
+                    self.migration_bytes += eviction_dma_bytes
+                if callback_pcie_blocks > 0:
+                    callback_pcie_bytes = callback_pcie_blocks * self.kv_cache.kv_bytes_per_block
+                    callback_pcie_est = self.system.estimate_kv_pcie(
+                        callback_pcie_bytes,
                         bw_bps=self.transfer_bw["pcie_bw_bps"],
                     )
-                    prefill_latency += pcie_est['latency']
-                    self.migration_time_s += pcie_est['latency']
-                    self.pcie_time_s += pcie_est['latency']
-                    self.migration_energy_nj += pcie_est['energy_nj']
-                    self.pcie_energy_nj += pcie_est['energy_nj']
-                    self.pcie_transfer_blocks += pcie_blocks
-                    self.migration_bytes += pcie_bytes
+                    # Callback transfer latency (L3->L1) is non-overlapped penalty.
+                    prefill_latency += callback_pcie_est['latency']
+                    self.migration_time_s += callback_pcie_est['latency']
+                    self.callback_migration_time_s += callback_pcie_est['latency']
+                    self.pcie_time_s += callback_pcie_est['latency']
+                    self.migration_energy_nj += callback_pcie_est['energy_nj']
+                    self.pcie_energy_nj += callback_pcie_est['energy_nj']
+                    self.pcie_transfer_blocks += callback_pcie_blocks
+                    self.callback_pcie_transfer_blocks += callback_pcie_blocks
+                    self.migration_bytes += callback_pcie_bytes
+                if eviction_pcie_blocks > 0:
+                    eviction_pcie_bytes = eviction_pcie_blocks * self.kv_cache.kv_bytes_per_block
+                    eviction_pcie_est = self.system.estimate_kv_pcie(
+                        eviction_pcie_bytes,
+                        bw_bps=self.transfer_bw["pcie_bw_bps"],
+                    )
+                    # Eviction transfer latency (L2->L3) is fully overlapped by policy.
+                    self.overlapped_eviction_time_s += eviction_pcie_est['latency']
+                    self.migration_energy_nj += eviction_pcie_est['energy_nj']
+                    self.pcie_energy_nj += eviction_pcie_est['energy_nj']
+                    self.pcie_transfer_blocks += eviction_pcie_blocks
+                    self.eviction_pcie_transfer_blocks += eviction_pcie_blocks
+                    self.migration_bytes += eviction_pcie_bytes
 
             if missed_blocks > 0 and self.system is not None:
                 effective_tokens = min(missed_blocks * 16, req.input_length)
@@ -243,7 +285,7 @@ class ContinuousScheduler:
             if req.prefill_progress_tokens >= req.input_length:
                 req.set_state(RequestLifecycle.DECODING)
             self._log(
-                "prefill req={} chunk_blocks={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] xfer=[dma_blocks={},pcie_blocks={}] progress={}/{}".format(
+                "prefill req={} chunk_blocks={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] xfer=[callback_dma={},callback_pcie={},evict_dma={},evict_pcie={}] progress={}/{}".format(
                     req.req_id,
                     len(block_indices),
                     hit_blocks,
@@ -254,8 +296,10 @@ class ContinuousScheduler:
                     l1_to_l2_moves,
                     l2_to_l3_moves,
                     l3_drop_blocks,
-                    dma_blocks,
-                    pcie_blocks,
+                    callback_dma_blocks,
+                    callback_pcie_blocks,
+                    eviction_dma_blocks,
+                    eviction_pcie_blocks,
                     req.prefill_progress_tokens,
                     req.input_length,
                 )
@@ -402,11 +446,17 @@ class ContinuousScheduler:
             "prefill_steps": self.prefill_steps,
             "decode_steps": self.decode_steps,
             "migration_time_s": self.migration_time_s,
+            "callback_migration_time_s": self.callback_migration_time_s,
+            "overlapped_eviction_time_s": self.overlapped_eviction_time_s,
             "dma_time_s": self.dma_time_s,
             "pcie_time_s": self.pcie_time_s,
             "migration_bytes": self.migration_bytes,
             "dma_transfer_blocks": self.dma_transfer_blocks,
             "pcie_transfer_blocks": self.pcie_transfer_blocks,
+            "callback_dma_transfer_blocks": self.callback_dma_transfer_blocks,
+            "callback_pcie_transfer_blocks": self.callback_pcie_transfer_blocks,
+            "eviction_dma_transfer_blocks": self.eviction_dma_transfer_blocks,
+            "eviction_pcie_transfer_blocks": self.eviction_pcie_transfer_blocks,
         }
         components = ["dram", "l2", "l1", "reg", "alu", "comm"]
         for i, name in enumerate(components):

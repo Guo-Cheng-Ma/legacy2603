@@ -76,6 +76,7 @@ class KVCacheManager:
         l1_capacity_bytes: Optional[int] = None,
         l2_capacity_bytes: int = 0,
         l3_capacity_bytes: int = 0,
+        spare_ratio: float = 0.01,
     ):
         if capacity_bytes < 0 and l1_capacity_bytes is None:
             raise ValueError("capacity_bytes must be >= 0 when l1 capacity is not set")
@@ -85,8 +86,11 @@ class KVCacheManager:
         l1_capacity = int(capacity_bytes) if l1_capacity_bytes is None else int(l1_capacity_bytes)
         if l1_capacity < 0 or int(l2_capacity_bytes) < 0 or int(l3_capacity_bytes) < 0:
             raise ValueError("tier capacities must be >= 0")
+        if float(spare_ratio) < 0.0 or float(spare_ratio) >= 1.0:
+            raise ValueError("spare_ratio must be in [0.0, 1.0)")
 
         self.kv_bytes_per_block = int(kv_bytes_per_block)
+        self.spare_ratio = float(spare_ratio)
         self._capacity: Dict[KVTier, int] = {
             KVTier.L1: l1_capacity,
             KVTier.L2: int(l2_capacity_bytes),
@@ -120,6 +124,14 @@ class KVCacheManager:
     def tier_capacity_bytes(self, tier: KVTier) -> int:
         return self._capacity[tier]
 
+    def _effective_capacity(self, tier: KVTier) -> int:
+        cap = self._capacity[tier]
+        reserve = int(cap * self.spare_ratio)
+        threshold = cap - reserve
+        if cap >= self.kv_bytes_per_block:
+            threshold = max(threshold, self.kv_bytes_per_block)
+        return max(threshold, 0)
+
     def _pop_lru(self, tier: KVTier) -> Optional[int]:
         entries = self._tiers[tier]
         if not entries:
@@ -143,7 +155,7 @@ class KVCacheManager:
         return None
 
     def _place_in_l3(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._capacity[KVTier.L3]
+        cap = self._effective_capacity(KVTier.L3)
         if cap < self.kv_bytes_per_block:
             self.stats.evictions += 1
             self.stats.l3_drops += 1
@@ -168,7 +180,7 @@ class KVCacheManager:
         return True
 
     def _place_in_l2(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._capacity[KVTier.L2]
+        cap = self._effective_capacity(KVTier.L2)
         if cap < self.kv_bytes_per_block:
             return self._place_in_l3(hash_id, result=result)
 
@@ -190,7 +202,7 @@ class KVCacheManager:
         return True
 
     def _place_in_l1(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._capacity[KVTier.L1]
+        cap = self._effective_capacity(KVTier.L1)
         if cap < self.kv_bytes_per_block:
             return False
 
@@ -288,11 +300,12 @@ class KVCacheManager:
         """Compatibility API used by legacy code paths."""
         if required_bytes <= 0:
             return 0
-        if required_bytes > self._capacity[tier]:
+        cap = self._effective_capacity(tier)
+        if required_bytes > cap:
             return -1
 
         evicted = 0
-        while self._used[tier] + required_bytes > self._capacity[tier]:
+        while self._used[tier] + required_bytes > cap:
             victim = self._pop_lru(tier)
             if victim is None:
                 break
@@ -301,7 +314,7 @@ class KVCacheManager:
                 self.stats.l3_drops += 1
             evicted += 1
 
-        if self._used[tier] + required_bytes > self._capacity[tier]:
+        if self._used[tier] + required_bytes > cap:
             return -1
         return evicted
 
@@ -337,6 +350,10 @@ class KVCacheManager:
             "l1_capacity_bytes": self._capacity[KVTier.L1],
             "l2_capacity_bytes": self._capacity[KVTier.L2],
             "l3_capacity_bytes": self._capacity[KVTier.L3],
+            "l1_effective_capacity_bytes": self._effective_capacity(KVTier.L1),
+            "l2_effective_capacity_bytes": self._effective_capacity(KVTier.L2),
+            "l3_effective_capacity_bytes": self._effective_capacity(KVTier.L3),
+            "spare_ratio": self.spare_ratio,
             "l1_used_bytes": self._used[KVTier.L1],
             "l2_used_bytes": self._used[KVTier.L2],
             "l3_used_bytes": self._used[KVTier.L3],
