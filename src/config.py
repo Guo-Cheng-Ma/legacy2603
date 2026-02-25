@@ -4,6 +4,46 @@ SCALING_FACTOR = {}
 SCALING_FACTOR['MAX_COMPUTE_UTIL'] = 0.8
 SCALING_FACTOR['MAX_OFF_MEM_BW_UTIL'] = 0.85
 
+# Heterogeneous 3-tier KV cache architecture constants.
+# Units:
+# - *_GB values use binary GiB conversion in helper APIs.
+# - *_BPS values are bytes/second.
+HETERO_KV_ARCH = {
+    "NUM_CARDS": 8,
+    "GPU_MEM_PER_CARD_GB": 60,
+    "HISPEED_KV_PER_CARD_GB": 20,  # L1 (compute layers)
+    "HICAP_TOTAL_PER_CARD_GB": 40,  # L2 (weights + KV)
+    "HOST_KV_TOTAL_GB": 512,  # L3 host spill tier
+    "DMA_BW_RATIO_TO_HBM": 0.5,  # L1<->L2 migration bandwidth scale
+    "PCIE4_X16_BW_BPS": 64 * 1000 * 1000 * 1000,  # keep consistent with InterfaceType.PCIE4
+}
+
+
+def gib_to_bytes(gib: float) -> int:
+    return int(float(gib) * 1024 * 1024 * 1024)
+
+
+def get_hetero_kv_capacities(weight_bytes_total: int = 0) -> dict:
+    """Return architecture-derived global KV capacities for L1/L2/L3 tiers."""
+    num_cards = int(HETERO_KV_ARCH["NUM_CARDS"])
+    l1_total = gib_to_bytes(
+        HETERO_KV_ARCH["HISPEED_KV_PER_CARD_GB"] * num_cards
+    )
+    l2_total = gib_to_bytes(
+        HETERO_KV_ARCH["HICAP_TOTAL_PER_CARD_GB"] * num_cards
+    )
+    l3_total = gib_to_bytes(HETERO_KV_ARCH["HOST_KV_TOTAL_GB"])
+
+    weight_bytes = max(0, int(weight_bytes_total))
+    l2_kv = max(0, l2_total - weight_bytes)
+    return {
+        "l1_kv_bytes": l1_total,
+        "l2_total_bytes": l2_total,
+        "l2_kv_bytes": l2_kv,
+        "l3_kv_bytes": l3_total,
+        "weight_bytes_total": weight_bytes,
+    }
+
 # ENERGY_TABLE: pJ per byte
 # Cache info: https://core.ac.uk/download/pdf/232142915.pdf
 ENERGY_TABLE = {

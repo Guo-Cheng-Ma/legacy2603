@@ -165,3 +165,27 @@
   - static-batch fields (`batch_id`, `batch_start_s`, `batch_finish_s`),
   - per-request input/output tokens and prompt blocks,
   - per-request KV reuse counters and hit rate.
+
+## 6) Heterogeneous 3-tier KV architecture constants
+
+The simulator now includes explicit architecture constants in `src/config.py`
+for the upcoming three-tier KV manager work:
+
+- 8 cards total.
+- Per-card memory split:
+  - L1 Hi-speed KV tier: 20 GB.
+  - L2 Hi-capacity tier: 40 GB (weights + KV).
+- Global host KV tier (L3): 512 GB.
+- L1<->L2 migration bandwidth: `0.5 * HBM BW`.
+- Host transfer bandwidth: PCIe 4.0 x16 constant.
+
+Capacity formulas:
+
+- `l1_kv_bytes = 8 * 20GB`
+- `l2_total_bytes = 8 * 40GB`
+- `l2_kv_bytes = max(0, l2_total_bytes - weight_bytes_total)`
+- `l3_kv_bytes = 512GB`
+
+Helper API:
+
+- `get_hetero_kv_capacities(weight_bytes_total)` in `src/config.py`.
