@@ -581,10 +581,16 @@ class System:
             'parallel_ff': bool(parallel_ff),
         }
 
-    def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+    def estimate_kv_transfer(self,
+                             bytes_size,
+                             transfer_type: KVTransferType,
+                             setup_s=0.0,
+                             bw_bps=None,
+                             energy_pj_per_byte=0.0):
         device = self.devices['GPU']
-        latency, energy_nj = device.estimate_kv_dma(
+        latency, energy_nj = device.estimate_kv_transfer(
             bytes_size=bytes_size,
+            transfer_type=transfer_type,
             setup_s=setup_s,
             bw_bps=bw_bps,
             energy_pj_per_byte=energy_pj_per_byte,
@@ -593,7 +599,30 @@ class System:
             'latency': latency,
             'energy_nj': energy_nj,
             'bytes': bytes_size,
+            'transfer_type': transfer_type.name,
         }
+
+    def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+        estimate = self.estimate_kv_transfer(
+            bytes_size=bytes_size,
+            transfer_type=KVTransferType.HBM_DMA,
+            setup_s=setup_s,
+            bw_bps=bw_bps,
+            energy_pj_per_byte=energy_pj_per_byte,
+        )
+        estimate.pop('transfer_type', None)
+        return estimate
+
+    def estimate_kv_pcie(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
+        estimate = self.estimate_kv_transfer(
+            bytes_size=bytes_size,
+            transfer_type=KVTransferType.PCIE,
+            setup_s=setup_s,
+            bw_bps=bw_bps,
+            energy_pj_per_byte=energy_pj_per_byte,
+        )
+        estimate.pop('transfer_type', None)
+        return estimate
 
     def get_required_mem_capacity(self, batch_size, lin, lout):
         ndec = self.model.ndec

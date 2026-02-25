@@ -19,6 +19,11 @@ class LayerType(Enum):
     KV_DMA = 7
 
 
+class KVTransferType(Enum):
+    HBM_DMA = 0
+    PCIE = 1
+
+
 class DeviceType(Enum):
     NONE = 0
     GPU = 1
