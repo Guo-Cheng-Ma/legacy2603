@@ -142,9 +142,11 @@ $ python main.py \
   --pim bank \
   --trace-file llm-req-inputs/qwen_thinking_blksz_16.jsonl \
   --max-batch-size 16 \
-  --prefill-chunk-tokens 128 \
-  --kv-hbm-ratio 0.3
+  --prefill-chunk-tokens 128
 ```
+
+`--kv-hbm-ratio` is deprecated in trace mode and ignored (capacity is now
+derived from the heterogeneous 3-tier architecture).
 
 Outputs:
 
@@ -160,7 +162,21 @@ Summary energy fields include:
 
 - `prefill_energy_nj`
 - `decode_energy_nj`
+- `migration_energy_nj`
 - `total_energy_nj`
+
+Summary cache fields include:
+
+- `kv_capacity_mode` (`hetero_3tier`)
+- `l1/l2/l3` capacities and occupancies
+- `l1_hits`, `l2_hits`, `l3_hits`, and tier hit rates
+- `dma_transfers`, `pcie_transfers`, `migration_time_s`
+
+Per-request fields now include:
+
+- `l1_hit_blocks`, `l2_hit_blocks`, `l3_hit_blocks`
+- `l1_to_l2_blocks`, `l2_to_l3_blocks`, `l3_drop_blocks`
+- `dma_blocks`, `pcie_blocks`, `migration_bytes`
 
 Trace record format (single JSONL row):
 

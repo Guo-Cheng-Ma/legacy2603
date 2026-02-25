@@ -320,6 +320,19 @@ def run_trace_simulation(
     total_kv = summary['kv_hit_blocks'] + summary['kv_miss_blocks']
     summary['kv_hit_rate'] = (summary['kv_hit_blocks'] / total_kv) if total_kv > 0 else 0.0
     summary['kv_evictions'] = summary['evictions']
+    total_tier_hits = summary.get('l1_hits', 0) + summary.get('l2_hits', 0) + summary.get('l3_hits', 0)
+    summary['l1_hit_rate'] = (summary.get('l1_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
+    summary['l2_hit_rate'] = (summary.get('l2_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
+    summary['l3_hit_rate'] = (summary.get('l3_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
+    summary['l1_used_ratio'] = (
+        summary.get('l1_used_bytes', 0) / summary.get('l1_capacity_bytes', 1)
+    ) if summary.get('l1_capacity_bytes', 0) > 0 else 0.0
+    summary['l2_used_ratio'] = (
+        summary.get('l2_used_bytes', 0) / summary.get('l2_capacity_bytes', 1)
+    ) if summary.get('l2_capacity_bytes', 0) > 0 else 0.0
+    summary['l3_used_ratio'] = (
+        summary.get('l3_used_bytes', 0) / summary.get('l3_capacity_bytes', 1)
+    ) if summary.get('l3_capacity_bytes', 0) > 0 else 0.0
     if hasattr(scheduler, "batch_stats"):
         summary.update(scheduler.batch_stats())
     summary.update(scheduler.energy_snapshot())
@@ -394,7 +407,13 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'avg_batch_max_output_tokens',
         'decode_padded_tokens',
         'prefill_chunk_tokens',
-        'kv_hbm_ratio',
+        'kv_capacity_mode',
+        'kv_hbm_ratio_deprecated',
+        'weight_reserved_bytes',
+        'l1_kv_capacity_bytes_cfg',
+        'l2_total_bytes_cfg',
+        'l2_kv_capacity_bytes_cfg',
+        'l3_kv_capacity_bytes_cfg',
         'required_cap_est_gb',
         'required_cap',
         'Lin',
@@ -439,11 +458,36 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'kv_hit_rate',
         'kv_evictions',
         'resident_blocks',
+        'l1_num_blocks',
+        'l2_num_blocks',
+        'l3_num_blocks',
+        'l1_hits',
+        'l2_hits',
+        'l3_hits',
+        'l1_hit_rate',
+        'l2_hit_rate',
+        'l3_hit_rate',
+        'l1_to_l2',
+        'l2_to_l3',
+        'l3_drops',
+        'l1_used_bytes',
+        'l2_used_bytes',
+        'l3_used_bytes',
+        'l1_capacity_bytes',
+        'l2_capacity_bytes',
+        'l3_capacity_bytes',
+        'l1_used_ratio',
+        'l2_used_ratio',
+        'l3_used_ratio',
         'used_bytes',
         'free_bytes',
         'capacity_bytes',
         'dma_transfers',
+        'pcie_transfers',
         'dma_time_s',
+        'pcie_time_s',
+        'migration_time_s',
+        'migration_bytes',
         'prefill_work_time_s',
         'decode_work_time_s',
         'prefill_steps',
@@ -452,6 +496,10 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'g_time (ms)',
         'prefill_energy_nj',
         'decode_energy_nj',
+        'model_energy_nj',
+        'migration_energy_nj',
+        'dma_energy_nj',
+        'pcie_energy_nj',
         'total_energy_nj',
         'prefill_dram_energy_nj',
         'prefill_l2_energy_nj',
@@ -505,8 +553,16 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'prompt_blocks',
         'reused_blocks',
         'computed_blocks',
+        'l1_hit_blocks',
+        'l2_hit_blocks',
+        'l3_hit_blocks',
+        'l1_to_l2_blocks',
+        'l2_to_l3_blocks',
+        'l3_drop_blocks',
+        'migration_bytes',
         'kv_hit_rate',
         'dma_blocks',
+        'pcie_blocks',
     ]
     with open(requests_path, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=request_cols)

@@ -166,6 +166,39 @@
   - per-request input/output tokens and prompt blocks,
   - per-request KV reuse counters and hit rate.
 
+### 3-tier KV fields in trace outputs
+
+`trace_summary_*.csv` now includes architecture and tier-state fields:
+
+- Capacity mode and config:
+  - `kv_capacity_mode` (`hetero_3tier`)
+  - `weight_reserved_bytes`
+  - `l1_kv_capacity_bytes_cfg`
+  - `l2_kv_capacity_bytes_cfg`
+  - `l3_kv_capacity_bytes_cfg`
+- Tier occupancy and hit stats:
+  - `l1_num_blocks`, `l2_num_blocks`, `l3_num_blocks`
+  - `l1_hits`, `l2_hits`, `l3_hits`
+  - `l1_hit_rate`, `l2_hit_rate`, `l3_hit_rate`
+  - `l1_used_ratio`, `l2_used_ratio`, `l3_used_ratio`
+- Migration counters and penalties:
+  - `dma_transfers`, `pcie_transfers`
+  - `dma_time_s`, `pcie_time_s`, `migration_time_s`
+  - `migration_bytes`
+  - `migration_energy_nj`, `dma_energy_nj`, `pcie_energy_nj`
+
+`trace_requests_*.csv` now includes per-request tier/migration fields:
+
+- `l1_hit_blocks`, `l2_hit_blocks`, `l3_hit_blocks`
+- `l1_to_l2_blocks`, `l2_to_l3_blocks`, `l3_drop_blocks`
+- `dma_blocks`, `pcie_blocks`, `migration_bytes`
+
+Interpretation:
+
+- Higher `l1_hit_rate` generally improves TTFT and throughput.
+- High `pcie_time_s` indicates host spill/refill is a bottleneck.
+- `total_energy_nj` includes both model compute energy and migration energy.
+
 ## 6) Heterogeneous 3-tier KV architecture constants
 
 The simulator now includes explicit architecture constants in `src/config.py`
