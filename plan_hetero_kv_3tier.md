@@ -19,9 +19,11 @@ Goal of this extension:
 ## 2) Locked design decisions
 
 - KV reuse scope stays global: any request/chat/user can reuse an existing `hash_id` block.
+- Cache scope stays global: one shared L1/L2/L3 KV pool (no per-card local KV partitioning).
 - Reuse unit is one 16-token hash block from trace `hash_ids`.
 - `input_length` drives prefill block checks; `output_length` drives decode token count.
 - Weight tensors stay resident in Hi-capacity tier and reduce available KV space there.
+- L2 weight reservation is computed globally once (aggregate across 8 cards).
 - `--kv-hbm-ratio` is removed from effective capacity logic (no ratio-based KV sizing).
 - Migration links:
   - Hi-capacity <-> Hi-speed uses DMA bandwidth = `0.5 * HBM3 BW`
@@ -29,6 +31,7 @@ Goal of this extension:
 - Eviction policy:
   - Hi-speed full: evict LRU block to Hi-capacity
   - Hi-capacity full: evict LRU block to host
+  - Host full: continue LRU eviction in host (drop oldest blocks)
 
 ## 3) Input contract alignment
 
@@ -66,7 +69,7 @@ Capacity formulas in simulator:
 For each prompt block (`hash_id`) during prefill:
 1. If block in L1: reuse immediately (no recompute, no migration).
 2. Else if in L2: count reuse, add DMA latency/energy for L2->L1 promotion.
-3. Else if in L3: count reuse, add PCIe latency/energy for L3->L1 refill.
+3. Else if in L3: count reuse, add PCIe latency/energy for direct L3->L1 refill.
 4. Else: compute block, then insert into L1.
 
 When inserting into L1 and full:
@@ -74,6 +77,9 @@ When inserting into L1 and full:
 
 When inserting to L2 and full:
 - evict LRU from L2 to L3 (add PCIe latency/energy).
+
+When inserting to L3 and full:
+- evict LRU in L3 (drop oldest block) and insert new block.
 
 Decode stage:
 - no new prompt blocks are generated; existing decode latency estimator remains, with migration penalties accumulated from prefill-stage cache operations.
@@ -206,9 +212,9 @@ git commit -m "<step message>"
 - Continuous and static scheduler parity for tiered KV behavior.
 - Trace outputs include enough data to analyze TTFT/throughput/energy impact of cache tiering.
 
-## 10) Clarifications needed before implementation starts
+## 10) Clarifications resolved
 
-1. Weight placement granularity: should `weight_bytes_total` reserve L2 once globally across 8 GPUs, or per-card then aggregated (equivalent only if tensor-parallel partitioning is strict)?
-2. Host hit refill path: on L3 hit, should we model direct `L3->L1` transfer, or enforced staged `L3->L2->L1`?
-3. Cross-card scope: is KV cache logically global with free migration across cards, or per-card local caches without inter-card block migration?
-4. If L3 (host) is full, should we drop oldest blocks silently or treat as simulation error/backpressure?
+1. L2 weight reservation is computed globally once.
+2. Host hit refill path is direct `L3->L1`.
+3. KV cache is modeled as one global shared pool.
+4. If L3 is full, continue eviction with LRU drop behavior.
