@@ -6,6 +6,7 @@ from typing import Dict, List
 from .continuous_scheduler import ContinuousScheduler
 from .kv_cache import KVCacheManager
 from .request_state import RequestState
+from .static_batch_scheduler import StaticBatchScheduler
 from .trace_loader import load_request_states
 from .type import DataType, DeviceType
 
@@ -223,6 +224,17 @@ def run_trace_simulation(
             debug=trace_debug,
             debug_interval=trace_debug_interval,
         )
+    elif trace_scheduler == "static":
+        scheduler = StaticBatchScheduler(
+            requests=requests,
+            max_batch_size=max_batch_size,
+            system=system,
+            kv_cache=kv_cache,
+            pipe_level=pipe_level,
+            parallel_ff=is_parallel,
+            debug=trace_debug,
+            debug_interval=trace_debug_interval,
+        )
     else:
         raise ValueError(f"unsupported trace_scheduler: {trace_scheduler}")
 
@@ -243,6 +255,9 @@ def run_trace_simulation(
             'turn': req.trace.turn,
             'arrival_s': req.timestamp,
             'start_s': req.start_time,
+            'batch_id': req.tags.get("batch_id"),
+            'batch_start_s': req.tags.get("batch_start_s"),
+            'batch_finish_s': req.tags.get("batch_finish_s"),
             'queue_delay_s': (req.start_time - req.timestamp) if req.start_time is not None else None,
             'first_token_s': req.first_token_time,
             'finish_s': req.finish_time,
@@ -287,6 +302,8 @@ def run_trace_simulation(
     summary['kv_evictions'] = summary['evictions']
     summary['dma_transfers'] = sum(req['dma_blocks'] for req in request_rows)
     summary['dma_time_s'] = 0.0
+    if hasattr(scheduler, "batch_stats"):
+        summary.update(scheduler.batch_stats())
     summary.update(scheduler.energy_snapshot())
     summary['Lin'] = summary.get('avg_input_tokens', 0.0)
     summary['Lout'] = summary.get('avg_output_tokens', 0.0)
@@ -347,6 +364,11 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'num_heads',
         'dhead',
         'max_batch_size',
+        'trace_scheduler_mode',
+        'num_batches',
+        'avg_batch_size',
+        'avg_batch_max_output_tokens',
+        'decode_padded_tokens',
         'prefill_chunk_tokens',
         'kv_hbm_ratio',
         'required_cap_est_gb',
@@ -446,6 +468,9 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'turn',
         'arrival_s',
         'start_s',
+        'batch_id',
+        'batch_start_s',
+        'batch_finish_s',
         'queue_delay_s',
         'first_token_s',
         'finish_s',
@@ -481,4 +506,5 @@ def run_trace_mode(system, args):
         system_name=args.system,
         gpu_name=args.gpu,
         pim_type=args.pim,
+        trace_scheduler=args.trace_scheduler,
     )
