@@ -37,6 +37,13 @@ class RequestState:
     reused_blocks: int = 0
     computed_blocks: int = 0
     dma_blocks: int = 0
+    l1_hit_blocks: int = 0
+    l2_hit_blocks: int = 0
+    l3_hit_blocks: int = 0
+    l1_to_l2_blocks: int = 0
+    l2_to_l3_blocks: int = 0
+    l3_drop_blocks: int = 0
+    migration_bytes: int = 0
     enqueued_time: Optional[float] = None
     start_time: Optional[float] = None
     first_token_time: Optional[float] = None
