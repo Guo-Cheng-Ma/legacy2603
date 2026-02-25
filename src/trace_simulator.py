@@ -268,8 +268,16 @@ def run_trace_simulation(
             'prompt_blocks': req.prompt_block_count,
             'reused_blocks': req.reused_blocks,
             'computed_blocks': req.computed_blocks,
+            'l1_hit_blocks': req.l1_hit_blocks,
+            'l2_hit_blocks': req.l2_hit_blocks,
+            'l3_hit_blocks': req.l3_hit_blocks,
+            'l1_to_l2_blocks': req.l1_to_l2_blocks,
+            'l2_to_l3_blocks': req.l2_to_l3_blocks,
+            'l3_drop_blocks': req.l3_drop_blocks,
+            'migration_bytes': req.migration_bytes,
             'kv_hit_rate': (req.reused_blocks / kv_total) if kv_total > 0 else 0.0,
             'dma_blocks': req.dma_blocks,
+            'pcie_blocks': req.l2_to_l3_blocks + req.l3_hit_blocks,
         })
 
     summary = _summarize_requests(completed, snapshot.sim_time)
@@ -300,11 +308,15 @@ def run_trace_simulation(
     total_kv = summary['kv_hit_blocks'] + summary['kv_miss_blocks']
     summary['kv_hit_rate'] = (summary['kv_hit_blocks'] / total_kv) if total_kv > 0 else 0.0
     summary['kv_evictions'] = summary['evictions']
-    summary['dma_transfers'] = sum(req['dma_blocks'] for req in request_rows)
-    summary['dma_time_s'] = 0.0
     if hasattr(scheduler, "batch_stats"):
         summary.update(scheduler.batch_stats())
     summary.update(scheduler.energy_snapshot())
+    summary['dma_transfers'] = summary.get('dma_transfer_blocks', sum(req['dma_blocks'] for req in request_rows))
+    summary['pcie_transfers'] = summary.get('pcie_transfer_blocks', sum(req['pcie_blocks'] for req in request_rows))
+    summary['dma_time_s'] = summary.get('dma_time_s', 0.0)
+    summary['pcie_time_s'] = summary.get('pcie_time_s', 0.0)
+    summary['migration_time_s'] = summary.get('migration_time_s', 0.0)
+    summary['migration_energy_nj'] = summary.get('migration_energy_nj', 0.0)
     summary['Lin'] = summary.get('avg_input_tokens', 0.0)
     summary['Lout'] = summary.get('avg_output_tokens', 0.0)
     summary['bs'] = summary.get('max_batch_size', 0)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional
 
 from .kv_cache import KVCacheManager
+from .config import HETERO_KV_ARCH
 from .request_state import RequestLifecycle, RequestState
 
 
@@ -60,6 +61,15 @@ class ContinuousScheduler:
         self.decode_work_time_s = 0.0
         self.prefill_steps = 0
         self.decode_steps = 0
+        self.migration_time_s = 0.0
+        self.dma_time_s = 0.0
+        self.pcie_time_s = 0.0
+        self.migration_energy_nj = 0.0
+        self.dma_energy_nj = 0.0
+        self.pcie_energy_nj = 0.0
+        self.dma_transfer_blocks = 0
+        self.pcie_transfer_blocks = 0
+        self.migration_bytes = 0
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -126,6 +136,8 @@ class ContinuousScheduler:
             l1_to_l2_moves = 0
             l2_to_l3_moves = 0
             l3_drop_blocks = 0
+            dma_blocks = 0
+            pcie_blocks = 0
             for block_idx in block_indices:
                 hash_id = req.trace.hash_ids[block_idx]
                 if self.kv_cache is None:
@@ -149,6 +161,8 @@ class ContinuousScheduler:
                 l1_to_l2_moves += access.l1_to_l2
                 l2_to_l3_moves += access.l2_to_l3
                 l3_drop_blocks += access.l3_drops
+                dma_blocks += access.dma_blocks
+                pcie_blocks += access.pcie_blocks
 
                 if access.is_hit:
                     req.reused_blocks += 1
@@ -159,6 +173,34 @@ class ContinuousScheduler:
 
             chunk_end = min(req.input_length, req.prefill_progress_tokens + self.prefill_chunk_tokens)
             req.prefill_progress_tokens = chunk_end
+
+            if self.system is not None and self.kv_cache is not None:
+                if dma_blocks > 0:
+                    dma_bytes = dma_blocks * self.kv_cache.kv_bytes_per_block
+                    dma_est = self.system.estimate_kv_dma(
+                        dma_bytes,
+                        bw_bps=self.system.devices['GPU'].peak_memory_bandwidth * HETERO_KV_ARCH["DMA_BW_RATIO_TO_HBM"],
+                    )
+                    prefill_latency += dma_est['latency']
+                    self.migration_time_s += dma_est['latency']
+                    self.dma_time_s += dma_est['latency']
+                    self.migration_energy_nj += dma_est['energy_nj']
+                    self.dma_energy_nj += dma_est['energy_nj']
+                    self.dma_transfer_blocks += dma_blocks
+                    self.migration_bytes += dma_bytes
+                if pcie_blocks > 0:
+                    pcie_bytes = pcie_blocks * self.kv_cache.kv_bytes_per_block
+                    pcie_est = self.system.estimate_kv_pcie(
+                        pcie_bytes,
+                        bw_bps=HETERO_KV_ARCH["PCIE4_X16_BW_BPS"],
+                    )
+                    prefill_latency += pcie_est['latency']
+                    self.migration_time_s += pcie_est['latency']
+                    self.pcie_time_s += pcie_est['latency']
+                    self.migration_energy_nj += pcie_est['energy_nj']
+                    self.pcie_energy_nj += pcie_est['energy_nj']
+                    self.pcie_transfer_blocks += pcie_blocks
+                    self.migration_bytes += pcie_bytes
 
             if missed_blocks > 0 and self.system is not None:
                 effective_tokens = min(missed_blocks * 16, req.input_length)
@@ -172,7 +214,7 @@ class ContinuousScheduler:
             if req.prefill_progress_tokens >= req.input_length:
                 req.set_state(RequestLifecycle.DECODING)
             self._log(
-                "prefill req={} chunk_blocks={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] progress={}/{}".format(
+                "prefill req={} chunk_blocks={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] xfer=[dma_blocks={},pcie_blocks={}] progress={}/{}".format(
                     req.req_id,
                     len(block_indices),
                     hit_blocks,
@@ -183,6 +225,8 @@ class ContinuousScheduler:
                     l1_to_l2_moves,
                     l2_to_l3_moves,
                     l3_drop_blocks,
+                    dma_blocks,
+                    pcie_blocks,
                     req.prefill_progress_tokens,
                     req.input_length,
                 )
@@ -311,17 +355,29 @@ class ContinuousScheduler:
         prefill_total_pj = sum(self.prefill_energy_pj)
         decode_total_pj = sum(self.decode_energy_pj)
         total_pj = prefill_total_pj + decode_total_pj
+        model_energy_nj = total_pj / 1000.0
+        total_energy_nj = model_energy_nj + self.migration_energy_nj
         snapshot = {
             "prefill_energy_pj": prefill_total_pj,
             "decode_energy_pj": decode_total_pj,
             "total_energy_pj": total_pj,
             "prefill_energy_nj": prefill_total_pj / 1000.0,
             "decode_energy_nj": decode_total_pj / 1000.0,
-            "total_energy_nj": total_pj / 1000.0,
+            "model_energy_nj": model_energy_nj,
+            "migration_energy_nj": self.migration_energy_nj,
+            "dma_energy_nj": self.dma_energy_nj,
+            "pcie_energy_nj": self.pcie_energy_nj,
+            "total_energy_nj": total_energy_nj,
             "prefill_work_time_s": self.prefill_work_time_s,
             "decode_work_time_s": self.decode_work_time_s,
             "prefill_steps": self.prefill_steps,
             "decode_steps": self.decode_steps,
+            "migration_time_s": self.migration_time_s,
+            "dma_time_s": self.dma_time_s,
+            "pcie_time_s": self.pcie_time_s,
+            "migration_bytes": self.migration_bytes,
+            "dma_transfer_blocks": self.dma_transfer_blocks,
+            "pcie_transfer_blocks": self.pcie_transfer_blocks,
         }
         components = ["dram", "l2", "l1", "reg", "alu", "comm"]
         for i, name in enumerate(components):
