@@ -148,6 +148,33 @@ class ContinuousScheduler:
                     continue
 
                 access = self.kv_cache.access(hash_id)
+                if self.debug and (access.hit_tier is not None and access.hit_tier != "L1"):
+                    self._log(
+                        "kv hit req={} hash_id={} tier={} promote_to_l1=yes".format(
+                            req.req_id,
+                            hash_id,
+                            access.hit_tier,
+                        )
+                    )
+                if self.debug and (access.l1_to_l2 > 0 or access.l2_to_l3 > 0 or access.l3_drops > 0):
+                    self._log(
+                        "kv evict req={} hash_id={} l1_to_l2={} l2_to_l3={} l3_drop={}".format(
+                            req.req_id,
+                            hash_id,
+                            access.l1_to_l2,
+                            access.l2_to_l3,
+                            access.l3_drops,
+                        )
+                    )
+                if self.debug and (access.dma_blocks > 0 or access.pcie_blocks > 0):
+                    self._log(
+                        "kv xfer req={} hash_id={} dma_blocks={} pcie_blocks={}".format(
+                            req.req_id,
+                            hash_id,
+                            access.dma_blocks,
+                            access.pcie_blocks,
+                        )
+                    )
                 req.l1_hit_blocks += access.l1_hit
                 req.l2_hit_blocks += access.l2_hit
                 req.l3_hit_blocks += access.l3_hit
