@@ -164,7 +164,7 @@ def main():
     parser.add_argument("--kv-hbm-ratio",
                         type=float,
                         default=0.3,
-                        help="fraction of HBM reserved for runtime KV cache")
+                        help="deprecated in 3-tier mode; kept only for backward-compatible CLI")
     parser.add_argument("--trace-debug",
                         action='store_true',
                         help="enable detailed trace-mode debug logs")
@@ -228,6 +228,7 @@ def main():
         system.set_accelerator(modelinfos, DeviceType.CPU, xpu_config['CPU'])
 
     if args.mode == 'trace':
+        print("Note: --kv-hbm-ratio is deprecated and ignored in hetero 3-tier KV mode.")
         if args.pim == "bg":
             dtype_tag = "BG"
         elif args.pim == "buffer":

@@ -1,9 +1,10 @@
 import csv
 import math
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .continuous_scheduler import ContinuousScheduler
+from .config import get_hetero_kv_capacities
 from .kv_cache import KVCacheManager
 from .request_state import RequestState
 from .static_batch_scheduler import StaticBatchScheduler
@@ -26,23 +27,21 @@ def _percentile(values: List[float], ratio: float) -> float:
     return ordered[idx]
 
 
-def _build_kv_cache(system, kv_hbm_ratio: float) -> KVCacheManager:
-    kv_hbm_ratio = max(0.0, min(1.0, float(kv_hbm_ratio)))
-
-    total_hbm = system.devices['GPU'].aggregate_memory_capacity
-    if system.hetero_name == DeviceType.PIM:
-        total_hbm += system.devices['Acc'].aggregate_memory_capacity
-
-    capacity_bytes = int(total_hbm * kv_hbm_ratio)
-
+def _build_kv_cache(system) -> Tuple[KVCacheManager, Dict]:
     a_byte = _activation_bytes(system.model.dtype)
     kv_bytes_per_token = system.model.ndec * 2 * system.model.hdim * a_byte
     kv_bytes_per_block = kv_bytes_per_token * 16
+    weight_bytes, _, _ = system.get_required_mem_capacity(batch_size=1, lin=1, lout=1)
+    tier_caps = get_hetero_kv_capacities(weight_bytes_total=weight_bytes)
 
-    return KVCacheManager(
-        capacity_bytes=max(capacity_bytes, kv_bytes_per_block),
+    cache = KVCacheManager(
+        capacity_bytes=max(tier_caps["l1_kv_bytes"], kv_bytes_per_block),
         kv_bytes_per_block=kv_bytes_per_block,
+        l1_capacity_bytes=max(tier_caps["l1_kv_bytes"], kv_bytes_per_block),
+        l2_capacity_bytes=tier_caps["l2_kv_bytes"],
+        l3_capacity_bytes=tier_caps["l3_kv_bytes"],
     )
+    return cache, tier_caps
 
 
 def _collect_system_metadata(system, requests: List[RequestState], max_batch_size: int) -> Dict:
@@ -202,15 +201,22 @@ def run_trace_simulation(
                 last_ts,
             )
         )
-    kv_cache = _build_kv_cache(system, kv_hbm_ratio)
+    kv_cache, kv_caps = _build_kv_cache(system)
     if trace_debug:
         kv_info = kv_cache.snapshot()
         print(
-            "[TRACE][sim] kv cache capacity_bytes={} kv_bytes_per_block={}".format(
-                kv_info["capacity_bytes"],
+            "[TRACE][sim] kv cache l1={} l2={} l3={} kv_bytes_per_block={} weight_reserved={}".format(
+                kv_info["l1_capacity_bytes"],
+                kv_info["l2_capacity_bytes"],
+                kv_info["l3_capacity_bytes"],
                 kv_cache.kv_bytes_per_block,
+                kv_caps["weight_bytes_total"],
             )
         )
+        if kv_hbm_ratio is not None:
+            print(
+                "[TRACE][sim] note: --kv-hbm-ratio is deprecated and ignored in 3-tier capacity mode"
+            )
 
     if trace_scheduler == "continuous":
         scheduler = ContinuousScheduler(
@@ -296,7 +302,13 @@ def run_trace_simulation(
     summary['power_constraint'] = bool(power_constraint)
     summary['max_batch_size'] = int(max_batch_size)
     summary['prefill_chunk_tokens'] = int(prefill_chunk_tokens)
-    summary['kv_hbm_ratio'] = float(kv_hbm_ratio)
+    summary['kv_capacity_mode'] = "hetero_3tier"
+    summary['kv_hbm_ratio_deprecated'] = float(kv_hbm_ratio)
+    summary['weight_reserved_bytes'] = kv_caps["weight_bytes_total"]
+    summary['l1_kv_capacity_bytes_cfg'] = kv_caps["l1_kv_bytes"]
+    summary['l2_total_bytes_cfg'] = kv_caps["l2_total_bytes"]
+    summary['l2_kv_capacity_bytes_cfg'] = kv_caps["l2_kv_bytes"]
+    summary['l3_kv_capacity_bytes_cfg'] = kv_caps["l3_kv_bytes"]
     summary['kv_bytes_per_block'] = kv_cache.kv_bytes_per_block
     summary['resident_blocks'] = summary.get('num_blocks', 0)
     summary['kv_cache_capacity_bytes'] = summary.get('capacity_bytes', 0)
