@@ -1,150 +1,318 @@
-# Plan to Add Prefix KV Reuse + Continuous Batching
+# Refactored Plan: Prefix KV Reuse + Continuous Batching
 
-## 1) Scope
+## 1) Background and motivation (restored blueprint context)
 
-Target capabilities:
-- Variable per-request `input_length` / `output_length`.
-- Arrival-time-driven request queue.
-- Continuous batching (backfill immediately when requests finish).
-- Prefix KV cache reuse based on `hash_ids` (16-token blocks), so reused blocks are not recomputed.
+Current simulator behavior:
 
-Non-goal for this phase:
-- Do not modify low-level Ramulator DRAM scheduling policy (`ramulator2/src/dram_controller/...`) unless needed for correctness.
+- fixed `(batch, lin, lout)` inputs only,
+- single-turn static execution style,
+- no request-arrival-time queueing,
+- no block-level KV cache reuse from trace `hash_id`.
 
-## 2) High-level design
+Target behavior:
 
-### A. Add a request-level simulation pipeline
+- trace-driven variable input/output lengths,
+- per-request timestamps and continuous batching,
+- prefix KV reuse by `hash_id` (reuse => skip recompute),
+- multi-turn reuse support through shared cached blocks.
 
-Introduce explicit request entities loaded from JSONL:
-- request fields: `chat_id`, `parent_chat_id`, `timestamp`, `input_length`, `output_length`, `turn`, `hash_ids`.
-- runtime fields: `arrival_time`, `start_time`, `finish_time`, `state`, `remaining_decode_tokens`, `cached_prefix_blocks`.
+This document keeps the earlier architectural motivation and refactors implementation into dependency-aware, commit-sized steps.
 
-This becomes the input to a scheduler instead of fixed `(batch, lin, lout)`.
+## 2) Locked design decisions
 
-### B. Add KV cache manager (prefix/block aware)
+- Reuse scope: global reuse across all requests/chats/users (confirmed).
+- Reuse unit: 16-token hash block (`hash_id` from trace).
+- Reuse condition: `hash_id` hit is reusable; no contiguous-prefix requirement.
+- Cache placement: KV cache capacity modeled in HBM pool.
+- Eviction: LRU on capacity pressure.
+- Decode policy: one token per active decoding request per scheduler step.
+- Prefill policy: chunked prefill interleaved with decode.
+- Admission policy: strict FIFO by arrival time (`timestamp`, stable tie-break).
+- Backfill policy: immediate refill of freed active slot.
+- Startup state: KV cache empty at `t=0`.
+- Compatibility: legacy fixed mode must remain functional.
 
-Create a KV cache component that:
-- tracks cached blocks by `hash_id`,
-- returns how many prefix blocks in a request can be reused,
-- accounts cache memory usage and evictions,
-- updates recency on access.
+## 2.1) Trace input contract (sample-aligned)
 
-Core behavior:
-- If block is reusable from cache: do not charge recompute for that block.
-- If block misses: charge prefill compute and insert block KV into cache.
+Sample request (provided and treated as canonical format):
 
-### C. Refactor compute model to support partial prefill + token-step decode
+```json
+{"chat_id": 0, "parent_chat_id": -1, "timestamp": 0.0, "input_length": 502, "output_length": 1494, "type": "thinking", "turn": 1, "hash_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]}
+```
 
-Current `System.simulate` is batch-static and monolithic.  
-Add new APIs for scheduler-driven execution:
-- `estimate_prefill(...)` with:
-  - total prompt length,
-  - cached prefix tokens,
-  - uncached new tokens.
-- `estimate_decode_step(...)` for one decode-token step with current active batch.
+Required parsing/validation behavior:
 
-This allows dynamic request mix and continuous batch updates over time.
+- required keys:
+  - `chat_id`, `parent_chat_id`, `timestamp`, `input_length`,
+    `output_length`, `type`, `turn`, `hash_ids`
+- `hash_ids` is a list of block IDs where one block = 16 input tokens
+- enforce `len(hash_ids) == ceil(input_length/16)`
+- using sample values: `ceil(502/16) = 32`, so 32 `hash_ids` is valid
+- cache lookup/reuse for each `hash_id` is global (not scoped by `chat_id`)
 
-### D. Implement continuous batching scheduler
+## 3) Target architecture 
 
-Event-driven loop:
-1. Move newly arrived requests (by timestamp) into wait queue.
-2. Admit requests into active set until `max_batch_size`.
-3. Process compute in steps:
-   - prefill for newly admitted requests (with KV reuse),
-   - decode one token-step for active requests.
-4. On completion, remove request and immediately backfill from wait queue.
-5. Repeat until all requests finish.
+### Runtime flow
 
-Outputs:
-- per-request latency/TTFT/finish time,
-- queue wait time,
-- throughput timeline,
-- cache hit/miss/reuse stats.
+1. Parse JSONL trace into typed request objects.
+2. Maintain arrival queue (`timestamp`) + FIFO waiting queue.
+3. Keep active set up to `max_batch_size`.
+4. Per scheduler step:
+   - move arrived requests to waiting queue,
+   - admit waiting requests to active set,
+   - run prefill micro-step for `PREFILLING` requests,
+   - run decode micro-step for `DECODING` requests,
+   - finish completed requests and immediately backfill.
+5. For each prompt block:
+   - KV hit => reuse, skip recompute,
+   - KV miss => compute and insert into KV cache.
+6. Emit trace-level and per-request metrics.
 
-## 3) Planned file-level changes
+### Components
 
-## Existing files to modify
+- `TraceLoader`: trace parsing and validation.
+- `RequestState`: lifecycle state + per-request runtime counters.
+- `KVCacheManager`: hash table + HBM accounting + LRU eviction.
+- `ContinuousScheduler`: queueing, active-set management, step loop.
+- `System` micro-cost APIs: prefill/decode estimation for variable shapes.
+- `TraceSimulator`: top-level orchestration and CSV export.
 
-- `main.py`
-  - Add trace-mode CLI args (trace path, max batch, cache capacity/policy, scheduler policy).
-  - Keep existing fixed-mode path for backward compatibility.
-- `src/system.py`
-  - Split monolithic simulation into reusable primitives (`estimate_prefill`, `estimate_decode_step`).
-  - Add interfaces used by scheduler for variable lengths and incremental progression.
-- `src/model.py`
-  - Support partial-prefill shape construction:
-    - total context length vs newly computed prefix-suffix length.
-  - Support decode-step construction without rebuilding full `lout` path each time.
-- `src/ramulator_wrapper.py`
-  - Ensure large sequence lengths from real traces are handled robustly.
-  - Pass/derive `maxlen` for trace generation to avoid incorrect fixed defaults.
+## 4) KV cache model details (restored)
 
-## New files to add
+- `kv_bytes_per_token = ndec * 2 * hdim * a_byte`
+- `kv_bytes_per_block = kv_bytes_per_token * 16`
+- capacity pool:
+  - GPU-only: aggregate GPU HBM
+  - GPU+PIM: aggregate GPU HBM + PIM HBM
+  - available KV capacity = total capacity minus non-KV reserve (configurable ratio)
+- insertion:
+  - if free space insufficient, evict LRU blocks until enough space
+  - then insert new block and mark as MRU
 
-- `src/trace_loader.py`
-  - JSONL parser and validation for `llm-req-inputs` format.
-- `src/request_state.py`
-  - Dataclasses for request static fields + runtime state.
-- `src/kv_cache.py`
-  - Prefix/block KV cache manager (lookup, insert, evict, stats).
-- `src/continuous_scheduler.py`
-  - Event loop for arrival handling, wait queue, active set, and continuous batching decisions.
-- `src/trace_simulator.py`
-  - High-level orchestration: loader + scheduler + system cost model + reporting.
+## 5) Continuous batching and scheduler details (restored)
 
-## Ramulator-side scripts (if needed)
+Request states:
 
-- `ramulator2/trace_gen/gen_trace_attacc_bank.py`
-- `ramulator2/trace_gen/gen_trace_attacc_bg.py`
-- `ramulator2/trace_gen/gen_trace_attacc_buffer.py`
-  - Optional small patch so `max_L` is safe for very long contexts seen in trace-driven mode.
+- `NOT_ARRIVED`, `WAITING`, `PREFILLING`, `DECODING`, `DONE`
 
-## 4) Execution plan (implementation order)
+Per-step policy:
 
-1. Build request ingestion layer
-   - parse JSONL -> validated request objects.
-   - keep deterministic ordering by `(timestamp, chat_id)`.
-2. Build KV cache manager
-   - hash-block lookup/insert/evict + memory accounting.
-   - expose `get_reusable_prefix_blocks(request)` API.
-3. Refactor cost model (`System`/`Transformer`)
-   - add partial-prefill/decode-step APIs.
-   - preserve current fixed-mode behavior.
-4. Implement continuous scheduler
-   - arrival queue + wait queue + active batch + completion backfill.
-   - integrate KV cache decisions before prefill charging.
-5. Integrate CLI and reports
-   - add trace mode in `main.py`.
-   - output request-level and aggregate metrics.
-6. Validation
-   - compare against old mode on synthetic fixed traces.
-   - run real trace and inspect cache-hit and latency sanity.
+1. Admit newly arrived requests into FIFO waiting queue.
+2. Fill active set from wait queue until `max_batch_size`.
+3. Prefill chunk processing:
+   - process up to `prefill_chunk_tokens` per prefill request,
+   - hits skip compute; misses compute + insert.
+4. Decode processing:
+   - one token per decoding request,
+   - decode cost padded by max active context length.
+5. Advance simulated time by step latency.
+6. Complete done requests and backfill immediately.
 
-## 5) Validation checklist
+## 6) Mandatory procedure after each commit step
 
-- Functional:
-  - requests processed in timestamp order.
-  - completed requests are immediately replaced when queue non-empty.
-  - cached hash blocks are not recharged for prefill compute.
-- Metrics:
-  - TTFT, end-to-end latency, throughput, queue depth over time.
-  - KV cache hit rate, evictions, effective reused tokens/blocks.
-- Regression:
-  - old fixed-mode path unchanged for existing command lines.
+After each step below (after edits), run:
 
-## 6) Open questions to resolve before coding
+```bash
+cd ramulator2/build
+cmake ..
+make -j
+```
 
-1. Reuse scope: Should same `hash_id` be reusable globally across all chats, or only within parent-linked conversation lineage (`parent_chat_id` chain)?
-2. Prefix strictness: Must reuse require contiguous prefix match from block 0, or can any block hit be reused even if earlier blocks miss?
-3. Position sensitivity: Should we treat same `hash_id` at different absolute positions as reusable (your statement suggests yes), or enforce position-aware reuse for model-faithful KV?
-4. Cache capacity: What KV cache capacity should we model (GB), and is it shared across all GPUs/attacc units or per-device?
-5. Eviction policy: Prefer `LRU`, `FIFO`, or another policy?
-6. Continuous batching granularity: Token-level decode step with one-token progress per active request, correct?
-7. Prefill policy: For new arrivals, do you want full prefill immediately, or chunked prefill interleaved with decode?
-8. Batch admission policy: FIFO by arrival time only, or priority policy (e.g., shortest job first / smallest remaining decode)?
-9. Padding model: For variable active lengths, should decode cost use max active context length (padded batch) or per-request no-padding estimate?
-10. Output format: Do you want a new CSV (per-request + aggregate), and what exact columns are mandatory?
-11. Ramulator depth: Is Python-side scheduler/cache extension sufficient now, or do you also want a Ramulator C++ request-queue model for memory-level contention per request stream?
-12. Warm-start behavior: Should cache start empty at t=0, or preload common prefix blocks (e.g., system prompt)?
+If build fails:
 
+1. fix bugs introduced in that step,
+2. re-run the same 3 commands until build passes.
+
+Then commit:
+
+```bash
+cd /home/lizhuoran200/vstack/attacc_simulator
+git add <files changed in this step>
+git commit -m "<step commit message>"
+```
+
+Constraint: each step changes 1-3 files.
+
+## 7) Dependency-ordered commit plan (refactored granular implementation)
+
+### C1. Add trace schema + loader
+
+- Depends on: none
+- Files (2):
+  - `src/request_state.py` (new)
+  - `src/trace_loader.py` (new)
+- Content:
+  - typed request record and default runtime fields,
+  - JSONL loader + validation (`len(hash_ids) == ceil(input_length/16)`),
+  - keep `type` field in request object for future policy extension,
+  - deterministic sort by `(timestamp, req_id)`.
+- Commit message:
+  - `feat(trace): add request schema and trace loader`
+
+### C2. Add scheduler skeleton and state machine
+
+- Depends on: C1
+- Files (2):
+  - `src/request_state.py`
+  - `src/continuous_scheduler.py` (new)
+- Content:
+  - lifecycle enum + transitions,
+  - arrival/wait/active containers,
+  - dry-run step loop for admission/backfill only.
+- Commit message:
+  - `feat(scheduler): add continuous scheduler skeleton`
+
+### C3. Add KV cache manager with LRU
+
+- Depends on: C1
+- Files (2):
+  - `src/kv_cache.py` (new)
+  - `src/request_state.py`
+- Content:
+  - global `hash_id` lookup table,
+  - HBM usage accounting,
+  - LRU eviction + access APIs.
+- Commit message:
+  - `feat(kv): add kv cache manager and lru eviction`
+
+### C4. Add variable-shape micro-cost APIs
+
+- Depends on: C1
+- Files (2):
+  - `src/system.py`
+  - `src/model.py`
+- Content:
+  - keep `System.simulate(...)` unchanged,
+  - add APIs for prefill microbatch and decode-step estimation.
+- Commit message:
+  - `feat(system): add prefill/decode micro-cost apis`
+
+### C5. Implement prefill with KV hit-skip semantics
+
+- Depends on: C2, C3, C4
+- Files (2):
+  - `src/continuous_scheduler.py`
+  - `src/kv_cache.py`
+- Content:
+  - chunked prefill execution,
+  - per-block hit/miss handling,
+  - counters for reused/computed blocks.
+- Commit message:
+  - `feat(prefill): skip kv recompute on hash hit`
+
+### C6. Implement decode progression and immediate backfill
+
+- Depends on: C5
+- Files (2):
+  - `src/continuous_scheduler.py`
+  - `src/request_state.py`
+- Content:
+  - one-token decode per active request per step,
+  - completion detection and same-step backfill,
+  - timing fields (`start`, `ttft`, `finish`).
+- Commit message:
+  - `feat(decode): add token-step decode and immediate backfill`
+
+### C7. Add top-level trace simulator
+
+- Depends on: C6
+- Files (2):
+  - `src/trace_simulator.py` (new)
+  - `src/continuous_scheduler.py`
+- Content:
+  - orchestration entrypoint for trace mode:
+    - load trace,
+    - setup scheduler/cache/system,
+    - run to completion,
+    - return summary data structures.
+- Commit message:
+  - `feat(trace): add end-to-end trace simulator orchestration`
+
+### C8. Add CLI switch for trace mode
+
+- Depends on: C7
+- Files (2):
+  - `main.py`
+  - `src/trace_simulator.py`
+- Content:
+  - new args:
+    - `--mode {fixed,trace}`
+    - `--trace-file`
+    - `--max-batch-size`
+    - `--prefill-chunk-tokens`
+    - `--kv-hbm-ratio`
+  - fixed mode path unchanged.
+- Commit message:
+  - `feat(cli): add trace mode runtime arguments`
+
+### C9. Add trace output CSVs
+
+- Depends on: C8
+- Files (2):
+  - `src/trace_simulator.py`
+  - `main.py`
+- Content:
+  - `trace_summary.csv`: latency/throughput/kv-hit/eviction metrics,
+  - `trace_requests.csv`: per-request timeline and reuse metrics.
+- Commit message:
+  - `feat(output): add trace summary and per-request csv`
+
+### C10. Add optional KV DMA penalty model
+
+- Depends on: C9
+- Files (3):
+  - `src/type.py`
+  - `src/devices.py`
+  - `src/system.py`
+- Content:
+  - logical KV DMA op and estimator hooks,
+  - optional reuse-locality mismatch penalty accounting.
+- Commit message:
+  - `feat(kv): add optional kv dma accounting`
+
+### C11. Update project documentation
+
+- Depends on: C10
+- Files (2):
+  - `workflow.md`
+  - `attacc-README.md`
+- Content:
+  - trace mode workflow and CLI examples,
+  - explicit KV reuse semantics by `hash_id`.
+- Commit message:
+  - `docs: add trace-mode workflow and kv reuse docs`
+
+### C12. Validation and expectation testing step (added)
+
+- Depends on: C11
+- Files (1-3):
+  - `workflow.md`
+  - `attacc-README.md`
+  - `plan.md` (checklist status update section)
+- Content:
+  - run validation scenarios and document pass/fail outcomes:
+    1. fixed mode regression vs prior behavior,
+    2. FIFO admission order for same/different timestamps,
+    3. continuous backfill on completion,
+    4. KV hit path skips recompute,
+    5. LRU eviction when KV pool overflows,
+    6. decode one-token-per-step behavior,
+    7. output CSV consistency checks.
+  - include a concise “expected vs observed” table for each scenario.
+  - include one explicit sample-row check using:
+    - `{"chat_id":0,"parent_chat_id":-1,"timestamp":0.0,"input_length":502,"output_length":1494,"type":"thinking","turn":1,"hash_ids":[...32 ids...]}`
+    - expected parser result: valid row, 32 blocks, eligible for global KV reuse.
+- Commit message:
+  - `test(docs): validate expected behavior for trace mode and kv reuse`
+
+## 8) Final validation checklist (end-of-plan gate)
+
+1. `--mode fixed` still compiles and behaves as before.
+2. Trace mode consumes variable-length requests with timestamps.
+3. Scheduler enforces FIFO admission and immediate backfill.
+4. KV `hash_id` hits are reused (no recomputation).
+5. KV capacity obeys HBM budget and LRU eviction.
+6. Decode advances one token/request/step.
+7. CSV outputs are generated and metrics are internally consistent.
+8. Optional DMA penalties only appear when enabled and applicable.
+9. Sample trace row with `input_length=502` is parsed as 32 hash blocks.

@@ -138,7 +138,13 @@
 ### Trace mode outputs
 
 - `trace_summary_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
-  - aggregate latency/throughput/KV hit metrics,
-  - energy summary (`prefill_energy_nj`, `decode_energy_nj`, `total_energy_nj`).
+  - run metadata (system/gpu/pim/model/dtype, capacity ratio, scheduler knobs),
+  - aggregate latency/TTFT/queue/throughput metrics,
+  - input/output token distribution stats (avg/p50/p95/max),
+  - KV cache and eviction stats,
+  - stage work counters (`prefill_work_time_s`, `decode_work_time_s`, steps),
+  - energy summary and component breakdown (dram/l2/l1/reg/alu/comm).
 - `trace_requests_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
-  - per-request arrival/start/TTFT/finish and KV reuse counters.
+  - per-request type/turn, arrival/start/queue/TTFT/finish,
+  - per-request input/output tokens and prompt blocks,
+  - per-request KV reuse counters and hit rate.

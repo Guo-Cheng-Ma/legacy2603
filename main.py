@@ -237,6 +237,12 @@ def main():
             kv_hbm_ratio=args.kv_hbm_ratio,
             trace_debug=args.trace_debug,
             trace_debug_interval=args.trace_debug_interval,
+            pipe_level=args.pipeopt,
+            is_parallel=args.ffopt,
+            power_constraint=args.powerlimit,
+            system_name=args.system,
+            gpu_name=args.gpu,
+            pim_type=args.pim,
         )
         summary = result['summary']
         summary_path, requests_path = _trace_output_paths(args.trace_file, dtype_tag)

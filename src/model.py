@@ -91,6 +91,7 @@ class Transformer:
         self.num_heads = modelinfos['num_heads']
         self.hdim = modelinfos['hdim']
         self.ff_scale = modelinfos['ff_scale']
+        self.gqa_size = modelinfos.get('gqa_size', 0)
         self.dtype = modelinfos['dtype']
         self.dhead = int(self.hdim / self.num_heads)
         self.tp = tensor_parallel

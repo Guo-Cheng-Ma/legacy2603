@@ -26,6 +26,8 @@ class ContinuousScheduler:
         system=None,
         kv_cache: Optional[KVCacheManager] = None,
         prefill_chunk_tokens: int = 128,
+        pipe_level: bool = False,
+        parallel_ff: bool = False,
         debug: bool = False,
         debug_interval: int = 100,
     ):
@@ -39,6 +41,8 @@ class ContinuousScheduler:
         self.system = system
         self.kv_cache = kv_cache
         self.prefill_chunk_tokens = prefill_chunk_tokens
+        self.pipe_level = bool(pipe_level)
+        self.parallel_ff = bool(parallel_ff)
         self.debug = debug
         self.debug_interval = max(1, int(debug_interval))
         self.step_count = 0
@@ -51,6 +55,11 @@ class ContinuousScheduler:
         # Energy is accumulated in pJ from estimator outputs.
         self.prefill_energy_pj = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.decode_energy_pj = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # Work counters accumulate estimated stage times before overlap.
+        self.prefill_work_time_s = 0.0
+        self.decode_work_time_s = 0.0
+        self.prefill_steps = 0
+        self.decode_steps = 0
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -158,7 +167,12 @@ class ContinuousScheduler:
         decode_latency = 0.0
         max_context_len = max(r.input_length + r.generated_tokens + 1 for r in decoding)
         if self.system is not None:
-            estimate = self.system.estimate_decode_step(len(decoding), max_context_len)
+            estimate = self.system.estimate_decode_step(
+                len(decoding),
+                max_context_len,
+                pipe=self.pipe_level,
+                parallel_ff=self.parallel_ff,
+            )
             decode_latency = estimate['latency']
             energy = estimate.get("energy", [0, 0, 0, 0, 0, 0])
             self.decode_energy_pj = [
@@ -197,6 +211,12 @@ class ContinuousScheduler:
 
         prefill_latency = self._step_prefill()
         decode_latency = self._step_decode()
+        if prefill_latency > 0:
+            self.prefill_steps += 1
+        if decode_latency > 0:
+            self.decode_steps += 1
+        self.prefill_work_time_s += prefill_latency
+        self.decode_work_time_s += decode_latency
         step_latency = max(prefill_latency, decode_latency)
 
         self.sim_time += step_latency
@@ -260,22 +280,38 @@ class ContinuousScheduler:
         prefill_total_pj = sum(self.prefill_energy_pj)
         decode_total_pj = sum(self.decode_energy_pj)
         total_pj = prefill_total_pj + decode_total_pj
-        return {
+        snapshot = {
             "prefill_energy_pj": prefill_total_pj,
             "decode_energy_pj": decode_total_pj,
             "total_energy_pj": total_pj,
             "prefill_energy_nj": prefill_total_pj / 1000.0,
             "decode_energy_nj": decode_total_pj / 1000.0,
             "total_energy_nj": total_pj / 1000.0,
+            "prefill_work_time_s": self.prefill_work_time_s,
+            "decode_work_time_s": self.decode_work_time_s,
+            "prefill_steps": self.prefill_steps,
+            "decode_steps": self.decode_steps,
         }
+        components = ["dram", "l2", "l1", "reg", "alu", "comm"]
+        for i, name in enumerate(components):
+            prefill_comp_pj = float(self.prefill_energy_pj[i])
+            decode_comp_pj = float(self.decode_energy_pj[i])
+            total_comp_pj = prefill_comp_pj + decode_comp_pj
+            snapshot[f"prefill_{name}_energy_pj"] = prefill_comp_pj
+            snapshot[f"decode_{name}_energy_pj"] = decode_comp_pj
+            snapshot[f"total_{name}_energy_pj"] = total_comp_pj
+            snapshot[f"prefill_{name}_energy_nj"] = prefill_comp_pj / 1000.0
+            snapshot[f"decode_{name}_energy_nj"] = decode_comp_pj / 1000.0
+            snapshot[f"total_{name}_energy_nj"] = total_comp_pj / 1000.0
+        return snapshot
 
     def snapshot(self) -> SchedulerSnapshot:
         num_done = len(self.done)
         num_active = len(self.active)
         num_waiting = len(self.wait_queue)
-        num_not_arrived = len(self.requests) - (
-            self.arrival_idx + num_waiting + num_active + num_done
-        )
+        # arrival_idx already counts all admitted requests (waiting + active + done),
+        # so not_arrived should not subtract queue/state counts again.
+        num_not_arrived = len(self.requests) - self.arrival_idx
 
         return SchedulerSnapshot(
             sim_time=self.sim_time,

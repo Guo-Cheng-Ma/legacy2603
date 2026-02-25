@@ -466,6 +466,10 @@ class System:
             latency += exec_time
             energy = [energy[i] + eng[i] for i in range(len(energy))]
 
+        # Align with fixed mode: one prefill pass runs across all decoder layers.
+        latency *= self.model.ndec
+        energy = [e * self.model.ndec for e in energy]
+
         return {
             'latency': latency,
             'energy': energy,
@@ -473,7 +477,7 @@ class System:
             'effective_lin': effective_lin,
         }
 
-    def estimate_decode_step(self, batch_size, active_context_len):
+    def estimate_decode_step(self, batch_size, active_context_len, pipe=False, parallel_ff=False):
         assert self.model_set, "Need to set_model"
         layers = self.model.build_decode_layers(
             batch_size,
@@ -481,18 +485,100 @@ class System:
             self.hetero_name in [DeviceType.CPU, DeviceType.PIM],
         )
 
-        latency = 0.0
         energy = [0, 0, 0, 0, 0, 0]
         for layer in layers:
             exec_time, eng = self._estimate_layer_time_energy(layer)
-            latency += exec_time
+            layer.exec_time = exec_time
             energy = [energy[i] + eng[i] for i in range(len(energy))]
+
+        # Align with fixed mode decode optimizations when running PIM.
+        if self.hetero_name == DeviceType.PIM:
+            qkv_time, prj_time, score_time, context_time, x2g_time, softmax_time = 0, 0, 0, 0, 0, 0
+            for layer in layers:
+                if layer.name in ["qkv"]:
+                    qkv_time += layer.exec_time
+                elif layer.name in ["proj"]:
+                    prj_time += layer.exec_time
+                elif layer.name in ["comm_x2g"]:
+                    x2g_time += layer.exec_time
+                elif layer.name in ["score"]:
+                    score_time += layer.exec_time
+                elif layer.name in ["context"]:
+                    context_time += layer.exec_time
+                elif layer.name in ["softmax"]:
+                    softmax_time += layer.exec_time
+
+            minimum_ratio = 1 / (self.model.num_heads / self.GPU.num_xpu)
+            if pipe is False:
+                attn_time = score_time + context_time + softmax_time
+                if attn_time > x2g_time:
+                    x2g_time *= minimum_ratio
+                else:
+                    x2g_time -= attn_time * (1 - minimum_ratio)
+            else:
+                fc_time = qkv_time + prj_time
+                attn_time = score_time + context_time + softmax_time
+                if attn_time > fc_time:
+                    qkv_time *= minimum_ratio
+                    prj_time *= minimum_ratio
+
+                    if attn_time > x2g_time:
+                        x2g_time *= minimum_ratio
+                    else:
+                        x2g_time -= attn_time * (1 - minimum_ratio)
+                else:
+                    if fc_time > x2g_time:
+                        x2g_time *= minimum_ratio
+                        qkv_time -= attn_time * (1 - minimum_ratio) * (3 / 4)
+                        prj_time -= attn_time * (1 - minimum_ratio) * (1 / 4)
+                    else:
+                        x2g_time -= attn_time * (1 - minimum_ratio)
+                        qkv_time *= minimum_ratio
+                        prj_time *= minimum_ratio
+            softmax_time = 0
+
+            for layer in layers:
+                if layer.name in ["qkv"]:
+                    layer.exec_time = qkv_time
+                elif layer.name in ["proj"]:
+                    layer.exec_time = prj_time
+                elif layer.name in ["comm_x2g"]:
+                    layer.exec_time = x2g_time / 2
+                elif layer.name in ["softmax"]:
+                    layer.exec_time = softmax_time
+
+            if parallel_ff:
+                bw_scale = self.devices['Acc'].peak_memory_bandwidth / self.devices[
+                    'GPU'].peak_memory_bandwidth
+                for layer in layers:
+                    if "ff" in layer.name:
+                        if layer.bound == "compute":
+                            attn_flops = self.devices[
+                                'GPU'].peak_memory_bandwidth / layer.dbyte * 2 * bw_scale
+                            ratio = self.devices['GPU'].peak_flops / (
+                                self.devices['GPU'].peak_flops + attn_flops)
+                            layer.exec_time *= ratio
+                        elif layer.bound == "memory":
+                            attn_eff_bw = self.devices[
+                                'GPU'].peak_memory_bandwidth * bw_scale / max(batch_size, 1)
+                            ratio = self.devices['GPU'].peak_memory_bandwidth / (
+                                self.devices['GPU'].peak_memory_bandwidth +
+                                attn_eff_bw)
+                            layer.exec_time *= ratio
+
+        latency = sum(layer.exec_time for layer in layers)
+
+        # Align with fixed mode: per-token decode cost covers all decoder layers.
+        latency *= self.model.ndec
+        energy = [e * self.model.ndec for e in energy]
 
         return {
             'latency': latency,
             'energy': energy,
             'batch_size': batch_size,
             'active_context_len': active_context_len,
+            'pipe_level': bool(pipe),
+            'parallel_ff': bool(parallel_ff),
         }
 
     def estimate_kv_dma(self, bytes_size, setup_s=0.0, bw_bps=None, energy_pj_per_byte=0.0):
@@ -533,4 +619,3 @@ class System:
         kv_memory = ndec * 2 * l * (hdim) * a_byte
 
         return weight_memory, kv_memory * batch_size, temp_memory * batch_size
-

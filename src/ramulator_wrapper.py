@@ -3,12 +3,18 @@ import subprocess
 import math
 import os
 import sys
+import tempfile
 from src.config import *
 from src.model import *
 from src.type import *
 
 
 class Ramulator:
+
+    CACHE_COLUMNS = [
+        'L', 'nhead', 'dhead', 'dbyte', 'pim_type', 'power_constraint',
+        'cycle', 'mac', 'softmax', 'mvgb', 'mvsb', 'wrgb'
+    ]
 
     def __init__(self,
                  modelinfos,
@@ -19,13 +25,51 @@ class Ramulator:
         self.df = pd.DataFrame()
         self.ramulator_dir = ramulator_dir
         self.output_log = output_log
-        if os.path.exists(output_log):
-            self.df = pd.read_csv(output_log)
+        self.df = self._load_cache_df(output_log)
         self.tCK = 0.769  # ns
         self.num_hbm = num_hbm
         self.nhead = modelinfos['num_heads']
         self.dhead = modelinfos['dhead']
         self.fast_mode = fast_mode
+
+    def _load_cache_df(self, path):
+        if not path or not os.path.exists(path):
+            return pd.DataFrame(columns=self.CACHE_COLUMNS)
+
+        try:
+            # Tolerate stale/corrupted cache lines instead of crashing startup.
+            df = pd.read_csv(path, on_bad_lines='skip')
+        except TypeError:
+            # Backward-compatible fallback for older pandas versions.
+            df = pd.read_csv(path, error_bad_lines=False, warn_bad_lines=True)
+        except Exception as e:
+            print(f"Warning: failed to read cache file {path}: {e}")
+            return pd.DataFrame(columns=self.CACHE_COLUMNS)
+
+        if df.empty:
+            return pd.DataFrame(columns=self.CACHE_COLUMNS)
+
+        for col in self.CACHE_COLUMNS:
+            if col not in df.columns:
+                df[col] = pd.NA
+        df = df[self.CACHE_COLUMNS]
+
+        numeric_cols = [
+            'L', 'nhead', 'dhead', 'dbyte', 'cycle', 'mac', 'softmax', 'mvgb',
+            'mvsb', 'wrgb'
+        ]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Normalize bool parsing for cached files written by different runs.
+        power_map = {'true': True, 'false': False}
+        df['power_constraint'] = (
+            df['power_constraint'].astype(str).str.strip().str.lower().map(
+                power_map))
+
+        df['pim_type'] = df['pim_type'].astype(str).str.strip()
+        df = df.dropna(subset=self.CACHE_COLUMNS)
+        return df
 
     def make_yaml_file(self, yaml_file, file_name, power_constraint):
         trace_path = os.path.join(self.ramulator_dir, file_name + ".trace")
@@ -70,25 +114,36 @@ class Ramulator:
 
     def update_log_file(self, log):
         if self.df.empty:
-            if os.path.exists(self.output_log):
-                df = pd.read_csv(self.output_log)
-            else:
-                columns = [
-                    'L', 'nhead', 'dhead', 'dbyte', 'pim_type',
-                    'power_constraint', 'cycle', 'mac', 'softmax', 'mvgb',
-                    'mvsb', 'wrgb'
-                ]
-                df = pd.DataFrame(columns=columns)
+            df = self._load_cache_df(self.output_log)
         else:
             df = self.df
-        if len(df.columns) > 12:
-            import pdb
-            pdb.set_trace()
+        if df.empty:
+            df = pd.DataFrame(columns=self.CACHE_COLUMNS)
         new_df = pd.DataFrame(columns=df.columns)
         new_df.loc[0] = log
         df = pd.concat([df, new_df]).drop_duplicates()
         self.df = df
-        self.df.to_csv(self.output_log, index=False)
+        if not self.output_log:
+            return
+
+        output_abs = os.path.abspath(self.output_log)
+        output_dir = os.path.dirname(output_abs) or "."
+        output_name = os.path.basename(output_abs)
+        os.makedirs(output_dir, exist_ok=True)
+
+        fd, tmp_log = tempfile.mkstemp(prefix=f"{output_name}.",
+                                       suffix=".tmp",
+                                       dir=output_dir)
+        os.close(fd)
+        try:
+            self.df.to_csv(tmp_log, index=False)
+            os.replace(tmp_log, output_abs)
+        except FileNotFoundError:
+            # Fallback for rare temp-file races from concurrent runs.
+            self.df.to_csv(output_abs, index=False)
+        finally:
+            if os.path.exists(tmp_log):
+                os.remove(tmp_log)
 
     #def run_ramulator(self):
     def run_ramulator(self, pim_type: PIMType, l, num_ops_per_hbm, dbyte,
@@ -259,12 +314,21 @@ class Ramulator:
             return self.run(pim_type, layer, power_constraint)
 
         else:
-            cycle = int(row.iloc[0]['cycle'])
-            mac = int(row.iloc[0]['mac'])
-            softmax = int(row.iloc[0]['softmax'])
-            mvgb = int(row.iloc[0]['mvgb'])
-            mvsb = int(row.iloc[0]['mvsb'])
-            wrgb = int(row.iloc[0]['wrgb'])
+            cached_cols = ['cycle', 'mac', 'softmax', 'mvgb', 'mvsb', 'wrgb']
+            row = row.dropna(subset=cached_cols)
+            if row.empty:
+                return self.run(pim_type, layer, power_constraint)
+
+            try:
+                cycle = int(row.iloc[0]['cycle'])
+                mac = int(row.iloc[0]['mac'])
+                softmax = int(row.iloc[0]['softmax'])
+                mvgb = int(row.iloc[0]['mvgb'])
+                mvsb = int(row.iloc[0]['mvsb'])
+                wrgb = int(row.iloc[0]['wrgb'])
+            except (TypeError, ValueError):
+                # Stale or corrupted cache entries should not crash simulation.
+                return self.run(pim_type, layer, power_constraint)
             si_io = wrgb * 32  # 256 bit
             tsv_io = (wrgb + mvsb + mvgb) * 32
             giomux_io = (wrgb + mvsb + mvgb) * 32
