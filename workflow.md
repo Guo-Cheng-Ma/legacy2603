@@ -257,3 +257,33 @@ Recent validation snapshot:
 
 - Synthetic KV tests: passed (`L1->L2`, `L2->L3`, `L3` drop, and direct `L3->L1` promotion).
 - Trace run on bounded subset (`/tmp/qwen_thinking_blksz_16_32.jsonl`): completed, produced summary/request CSVs with 3-tier metrics.
+
+## 8) Parallel Ramulator Cache Pre-Generation (BA)
+
+To reduce runtime trace-generation bottlenecks, use the standalone pregen tool:
+
+```bash
+cd ramulator2/trace_gen
+python3 pregen_ramulator_bank.py --config pregen_bank.yaml
+```
+
+Behavior:
+
+- Pre-generates BA (`gen_trace_attacc_bank.py`) cache rows and writes to `ramulator.out`.
+- Skips keys already existing in `ramulator.out`.
+- Runs tasks in parallel (`workers` configurable, default 100).
+- Uses a single atomic writer path to avoid concurrent CSV corruption.
+- Keeps all temporary traces/YAMLs under `ramulator2/trace_gen/tmp/`:
+  - `tmp/traces/`
+  - `tmp/yamls/`
+
+Key dimensions covered by default config:
+
+- batch-derived `nhead` for batch sizes 1..16
+- `seqlen` range 1..8192
+- `dhead=128`, `dbyte=2`
+- `maxlen=max(4096, seqlen)`
+
+Config example file:
+
+- `ramulator2/trace_gen/pregen_bank.yaml`
