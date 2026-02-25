@@ -93,6 +93,7 @@
 - `main.py` now supports:
   - `--mode fixed` (legacy static `(batch, lin, lout)` path),
   - `--mode trace` (continuous batching + trace-driven requests).
+  - `--trace-scheduler {continuous,static}` for trace-mode scheduling policy.
 
 ### Fixed mode vs Trace mode
 
@@ -104,9 +105,23 @@
 - `trace` mode:
   - input is JSONL request stream (`--trace-file`),
   - supports per-request `timestamp`, variable input/output lengths,
-  - uses FIFO waiting queue + continuous batching + immediate backfill,
+  - uses either:
+    - `continuous`: FIFO waiting queue + immediate backfill, or
+    - `static`: FIFO static batching without backfill inside a running batch,
   - uses global KV reuse by `hash_id` with LRU eviction,
   - output is timestamped request/summary CSVs for this run.
+
+### Static scheduler semantics (`--trace-scheduler static`)
+
+- Batch formation:
+  - FIFO over arrived requests, up to `--max-batch-size`.
+  - Requests that arrive while a batch is running wait for the next batch.
+- Decode semantics:
+  - all requests in the batch start decode together,
+  - decode runs for `max(output_length)` steps in that batch,
+  - batch finishes only when the longest response finishes.
+- Completion timestamps:
+  - all requests in a batch are marked with the same batch finish timestamp.
 
 ### Trace mode runtime pipeline
 
@@ -143,8 +158,10 @@
   - input/output token distribution stats (avg/p50/p95/max),
   - KV cache and eviction stats,
   - stage work counters (`prefill_work_time_s`, `decode_work_time_s`, steps),
+  - scheduler/batch stats (`trace_scheduler_mode`, `num_batches`, `avg_batch_size`),
   - energy summary and component breakdown (dram/l2/l1/reg/alu/comm).
 - `trace_requests_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`:
   - per-request type/turn, arrival/start/queue/TTFT/finish,
+  - static-batch fields (`batch_id`, `batch_start_s`, `batch_finish_s`),
   - per-request input/output tokens and prompt blocks,
   - per-request KV reuse counters and hit rate.
