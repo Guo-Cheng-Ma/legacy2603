@@ -3,6 +3,7 @@ from collections import deque
 from typing import Deque, Dict, List, Optional
 
 from .continuous_scheduler import SchedulerSnapshot
+from .config import HETERO_KV_ARCH
 from .kv_cache import KVCacheManager
 from .request_state import RequestLifecycle, RequestState
 
@@ -45,6 +46,15 @@ class StaticBatchScheduler:
         self.decode_work_time_s = 0.0
         self.prefill_steps = 0
         self.decode_steps = 0
+        self.migration_time_s = 0.0
+        self.dma_time_s = 0.0
+        self.pcie_time_s = 0.0
+        self.migration_energy_nj = 0.0
+        self.dma_energy_nj = 0.0
+        self.pcie_energy_nj = 0.0
+        self.dma_transfer_blocks = 0
+        self.pcie_transfer_blocks = 0
+        self.migration_bytes = 0
 
         self.num_batches = 0
         self.total_batch_size = 0
@@ -84,6 +94,8 @@ class StaticBatchScheduler:
             return 0.0
 
         batch_max_miss_tokens = 0
+        batch_dma_blocks = 0
+        batch_pcie_blocks = 0
         for req in batch:
             req.set_state(RequestLifecycle.PREFILLING)
             req.start_time = self.sim_time
@@ -92,33 +104,100 @@ class StaticBatchScheduler:
 
             missed_blocks = 0
             hit_blocks = 0
+            l1_hits = 0
+            l2_hits = 0
+            l3_hits = 0
+            l1_to_l2 = 0
+            l2_to_l3 = 0
+            l3_drop = 0
+            req_dma_blocks = 0
+            req_pcie_blocks = 0
             for block_idx in range(int(math.ceil(req.input_length / 16.0))):
                 hash_id = req.trace.hash_ids[block_idx]
-                hit = self.kv_cache.probe(hash_id) if self.kv_cache is not None else False
-                if hit:
+                if self.kv_cache is None:
+                    req.computed_blocks += 1
+                    missed_blocks += 1
+                    continue
+
+                access = self.kv_cache.access(hash_id)
+                req.l1_hit_blocks += access.l1_hit
+                req.l2_hit_blocks += access.l2_hit
+                req.l3_hit_blocks += access.l3_hit
+                req.l1_to_l2_blocks += access.l1_to_l2
+                req.l2_to_l3_blocks += access.l2_to_l3
+                req.l3_drop_blocks += access.l3_drops
+                req.dma_blocks += access.dma_blocks
+                req.migration_bytes += access.migration_blocks * self.kv_cache.kv_bytes_per_block
+
+                l1_hits += access.l1_hit
+                l2_hits += access.l2_hit
+                l3_hits += access.l3_hit
+                l1_to_l2 += access.l1_to_l2
+                l2_to_l3 += access.l2_to_l3
+                l3_drop += access.l3_drops
+                req_dma_blocks += access.dma_blocks
+                req_pcie_blocks += access.pcie_blocks
+
+                if access.is_hit:
                     req.reused_blocks += 1
                     hit_blocks += 1
                 else:
                     req.computed_blocks += 1
                     missed_blocks += 1
-                    if self.kv_cache is not None:
-                        self.kv_cache.insert(hash_id)
 
             req.prefill_progress_tokens = req.input_length
             req.set_state(RequestLifecycle.DECODING)
             miss_tokens = min(req.input_length, missed_blocks * 16)
             batch_max_miss_tokens = max(batch_max_miss_tokens, miss_tokens)
+            batch_dma_blocks += req_dma_blocks
+            batch_pcie_blocks += req_pcie_blocks
             self._log(
-                "prefill req={} hit={} miss={} progress={}/{}".format(
+                "prefill req={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] xfer=[dma_blocks={},pcie_blocks={}] progress={}/{}".format(
                     req.req_id,
                     hit_blocks,
                     missed_blocks,
+                    l1_hits,
+                    l2_hits,
+                    l3_hits,
+                    l1_to_l2,
+                    l2_to_l3,
+                    l3_drop,
+                    req_dma_blocks,
+                    req_pcie_blocks,
                     req.prefill_progress_tokens,
                     req.input_length,
                 )
             )
 
         prefill_latency = 0.0
+        if self.system is not None and self.kv_cache is not None:
+            if batch_dma_blocks > 0:
+                dma_bytes = batch_dma_blocks * self.kv_cache.kv_bytes_per_block
+                dma_est = self.system.estimate_kv_dma(
+                    dma_bytes,
+                    bw_bps=self.system.devices['GPU'].peak_memory_bandwidth * HETERO_KV_ARCH["DMA_BW_RATIO_TO_HBM"],
+                )
+                prefill_latency += dma_est["latency"]
+                self.migration_time_s += dma_est["latency"]
+                self.dma_time_s += dma_est["latency"]
+                self.migration_energy_nj += dma_est["energy_nj"]
+                self.dma_energy_nj += dma_est["energy_nj"]
+                self.dma_transfer_blocks += batch_dma_blocks
+                self.migration_bytes += dma_bytes
+            if batch_pcie_blocks > 0:
+                pcie_bytes = batch_pcie_blocks * self.kv_cache.kv_bytes_per_block
+                pcie_est = self.system.estimate_kv_pcie(
+                    pcie_bytes,
+                    bw_bps=HETERO_KV_ARCH["PCIE4_X16_BW_BPS"],
+                )
+                prefill_latency += pcie_est["latency"]
+                self.migration_time_s += pcie_est["latency"]
+                self.pcie_time_s += pcie_est["latency"]
+                self.migration_energy_nj += pcie_est["energy_nj"]
+                self.pcie_energy_nj += pcie_est["energy_nj"]
+                self.pcie_transfer_blocks += batch_pcie_blocks
+                self.migration_bytes += pcie_bytes
+
         if batch_max_miss_tokens > 0 and self.system is not None:
             estimate = self.system.estimate_prefill_microbatch(
                 len(batch),
@@ -257,17 +336,29 @@ class StaticBatchScheduler:
         prefill_total_pj = sum(self.prefill_energy_pj)
         decode_total_pj = sum(self.decode_energy_pj)
         total_pj = prefill_total_pj + decode_total_pj
+        model_energy_nj = total_pj / 1000.0
+        total_energy_nj = model_energy_nj + self.migration_energy_nj
         snapshot = {
             "prefill_energy_pj": prefill_total_pj,
             "decode_energy_pj": decode_total_pj,
             "total_energy_pj": total_pj,
             "prefill_energy_nj": prefill_total_pj / 1000.0,
             "decode_energy_nj": decode_total_pj / 1000.0,
-            "total_energy_nj": total_pj / 1000.0,
+            "model_energy_nj": model_energy_nj,
+            "migration_energy_nj": self.migration_energy_nj,
+            "dma_energy_nj": self.dma_energy_nj,
+            "pcie_energy_nj": self.pcie_energy_nj,
+            "total_energy_nj": total_energy_nj,
             "prefill_work_time_s": self.prefill_work_time_s,
             "decode_work_time_s": self.decode_work_time_s,
             "prefill_steps": self.prefill_steps,
             "decode_steps": self.decode_steps,
+            "migration_time_s": self.migration_time_s,
+            "dma_time_s": self.dma_time_s,
+            "pcie_time_s": self.pcie_time_s,
+            "migration_bytes": self.migration_bytes,
+            "dma_transfer_blocks": self.dma_transfer_blocks,
+            "pcie_transfer_blocks": self.pcie_transfer_blocks,
         }
         components = ["dram", "l2", "l1", "reg", "alu", "comm"]
         for i, name in enumerate(components):
