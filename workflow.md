@@ -222,3 +222,29 @@ Capacity formulas:
 Helper API:
 
 - `get_hetero_kv_capacities(weight_bytes_total)` in `src/config.py`.
+
+## 7) Validation checklist (C32)
+
+Use this checklist after changes to trace scheduler / KV cache:
+
+1. Build regression:
+   - `cd ramulator2/build`
+   - `cmake ..`
+   - `make -j`
+2. Tier-transition unit checks (small synthetic capacities):
+   - verify L1->L2, L2->L3, and L3 drop counts increase under pressure.
+   - verify L3 hit triggers direct `L3->L1` promotion.
+3. Functional trace run (external request format):
+   - run with `llm-req-inputs/qwen_thinking_blksz_16.jsonl` (or bounded subset for faster iteration).
+   - ensure output files are generated:
+     - `trace_summary_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`
+     - `trace_requests_{dtype}_{mmdd_hhmmss}_{input_request_name}.csv`
+4. Sanity checks on outputs:
+   - `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s` are populated.
+   - tier metrics exist: `l1/l2/l3` hits, occupancy, and migration counters.
+   - energy includes migration terms (`migration_energy_nj`) and combined `total_energy_nj`.
+
+Recent validation snapshot:
+
+- Synthetic KV tests: passed (`L1->L2`, `L2->L3`, `L3` drop, and direct `L3->L1` promotion).
+- Trace run on bounded subset (`/tmp/qwen_thinking_blksz_16_32.jsonl`): completed, produced summary/request CSVs with 3-tier metrics.

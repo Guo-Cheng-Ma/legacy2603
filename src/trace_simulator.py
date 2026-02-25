@@ -425,6 +425,7 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'kv_cache_used_gb',
         'kv_cache_free_gb',
         'num_requests',
+        'total_time_s',
         'num_singleturn_requests',
         'num_multiturn_requests',
         'trace_window_s',
