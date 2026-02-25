@@ -22,3 +22,4 @@ timestamp,step,status,files,build,notes
 2026-02-25T11:22:35+08:00,C21,completed,main.py|src/trace_simulator.py,cmake+make pass,added --trace-scheduler CLI argument and trace simulator plumbing (continuous active, static hook prepared)
 2026-02-25T11:25:59+08:00,C22,completed,src/static_batch_scheduler.py|src/trace_simulator.py,cmake+make pass,added static batching scheduler and integrated --trace-scheduler static path with batch-level request fields in outputs
 2026-02-25T11:27:36+08:00,C23,completed,workflow.md|timeline.csv,cmake+make pass,documented trace --trace-scheduler static semantics and validated static-vs-continuous behavior on a 2-request trace (static shares finish time by longest output)
+2026-02-25T12:30:00+08:00,C24,completed,plan_hetero_kv_3tier.md|timeline.csv,cmake+make N/A (plan-only),added dependency-ordered implementation plan for heterogeneous HBM-PIM 3-tier KV cache with mandatory per-step build+commit procedure and validation step
