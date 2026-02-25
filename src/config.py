@@ -361,6 +361,14 @@ def make_model_config(name, dtype):
     model_table['MT-1008B'] = [128, 25600, 160, 160, 4, 1]
     model_table['OPT-66B'] = [64, 9216, 72, 128, 4, 1]
 
+    model_table["Qwen3-4B"] = [36, 2560, 32, 128, 3.8, 4]
+    model_table["Qwen3-32B"] = [64, 5120, 64, 128, 5.0, 8]
+    model_table["Mistral-Devstral2-123B"] = [80, 12288, 96, 128, 3.25, 16]
+    model_table["Llama-3.1-405B"] = [126, 16384, 128, 128, 3.25, 16]
+    
+
+    
+
     ndec, hdim, nheads, dhead, ff_scale, gqa_size = model_table[name]
     config = {
         'name': name,
