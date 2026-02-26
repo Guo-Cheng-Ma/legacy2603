@@ -171,6 +171,7 @@ def run_trace_simulation(
     max_batch_size: int,
     prefill_chunk_tokens: int,
     kv_arch_config: str,
+    timestamp_scaling: float = 1.0,
     trace_debug: bool = False,
     trace_debug_interval: int = 100,
     pipe_level: bool = False,
@@ -183,16 +184,17 @@ def run_trace_simulation(
 ):
     if trace_debug:
         print(
-            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_arch_config={}".format(
+            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_arch_config={} timestamp_scaling={}".format(
                 trace_file,
                 max_batch_size,
                 prefill_chunk_tokens,
                 kv_arch_config,
+                timestamp_scaling,
             )
         )
     kv_arch_cfg = load_hetero_kv_arch_config(kv_arch_config)
     bw_cfg = get_hetero_transfer_bandwidths(kv_arch_cfg)
-    requests = load_request_states(trace_file)
+    requests = load_request_states(trace_file, timestamp_scale=timestamp_scaling)
     if trace_debug:
         first_ts = requests[0].timestamp if requests else 0.0
         last_ts = requests[-1].timestamp if requests else 0.0
@@ -309,6 +311,7 @@ def run_trace_simulation(
     summary['power_constraint'] = bool(power_constraint)
     summary['max_batch_size'] = int(max_batch_size)
     summary['prefill_chunk_tokens'] = int(prefill_chunk_tokens)
+    summary['timestamp_scaling'] = float(timestamp_scaling)
     summary['kv_capacity_mode'] = "hetero_3tier"
     summary['kv_arch_config'] = kv_arch_config
     summary['num_cards_cfg'] = kv_arch_cfg["NUM_CARDS"]
@@ -417,6 +420,7 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'avg_batch_max_output_tokens',
         'decode_padded_tokens',
         'prefill_chunk_tokens',
+        'timestamp_scaling',
         'kv_capacity_mode',
         'kv_arch_config',
         'num_cards_cfg',
@@ -598,6 +602,7 @@ def run_trace_mode(system, args):
         max_batch_size=args.max_batch_size,
         prefill_chunk_tokens=args.prefill_chunk_tokens,
         kv_arch_config=args.kv_arch_config,
+        timestamp_scaling=args.timestamp_scaling,
         trace_debug=args.trace_debug,
         trace_debug_interval=args.trace_debug_interval,
         pipe_level=args.pipeopt,

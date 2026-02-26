@@ -28,7 +28,7 @@ def _require(condition: bool, message: str) -> None:
         raise TraceFormatError(message)
 
 
-def _validate_and_build(req_id: int, line_no: int, row: Dict) -> TraceRequest:
+def _validate_and_build(req_id: int, line_no: int, row: Dict, timestamp_scale: float) -> TraceRequest:
     missing = sorted(REQUIRED_TRACE_KEYS - set(row.keys()))
     _require(not missing, f"line {line_no}: missing required keys: {missing}")
 
@@ -85,7 +85,7 @@ def _validate_and_build(req_id: int, line_no: int, row: Dict) -> TraceRequest:
         req_id=req_id,
         chat_id=chat_id,
         parent_chat_id=parent_chat_id,
-        timestamp=float(timestamp),
+        timestamp=float(timestamp) * timestamp_scale,
         input_length=input_length,
         output_length=output_length,
         request_type=request_type,
@@ -110,19 +110,34 @@ def _iter_rows(trace_path: Path) -> Iterable[Dict]:
             yield line_no, row
 
 
-def load_trace_requests(trace_path: Union[str, Path]) -> List[TraceRequest]:
+def load_trace_requests(trace_path: Union[str, Path], timestamp_scale: float = 1.0) -> List[TraceRequest]:
     path = Path(trace_path)
     _require(path.exists(), f"trace file not found: {path}")
+    _require(
+        isinstance(timestamp_scale, (int, float)) and float(timestamp_scale) > 0.0,
+        f"timestamp_scale must be > 0, got {timestamp_scale}",
+    )
+    timestamp_scale = float(timestamp_scale)
 
     requests: List[TraceRequest] = []
     req_id = 0
     for line_no, row in _iter_rows(path):
-        requests.append(_validate_and_build(req_id=req_id, line_no=line_no, row=row))
+        requests.append(
+            _validate_and_build(
+                req_id=req_id,
+                line_no=line_no,
+                row=row,
+                timestamp_scale=timestamp_scale,
+            )
+        )
         req_id += 1
 
     requests.sort(key=lambda request: (request.timestamp, request.req_id))
     return requests
 
 
-def load_request_states(trace_path: Union[str, Path]) -> List[RequestState]:
-    return [RequestState(trace=request) for request in load_trace_requests(trace_path)]
+def load_request_states(trace_path: Union[str, Path], timestamp_scale: float = 1.0) -> List[RequestState]:
+    return [
+        RequestState(trace=request)
+        for request in load_trace_requests(trace_path, timestamp_scale=timestamp_scale)
+    ]

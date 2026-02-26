@@ -177,6 +177,10 @@ def main():
                         default='continuous',
                         choices=['continuous', 'static'],
                         help="trace scheduler policy: continuous backfill or static batching")
+    parser.add_argument("--timestamp-scaling",
+                        type=float,
+                        default=1.0,
+                        help="multiply all input request timestamps in trace mode")
 
     args = parser.parse_args()
 
@@ -240,6 +244,7 @@ def main():
             max_batch_size=args.max_batch_size,
             prefill_chunk_tokens=args.prefill_chunk_tokens,
             kv_arch_config=args.kv_arch_config,
+            timestamp_scaling=args.timestamp_scaling,
             trace_debug=args.trace_debug,
             trace_debug_interval=args.trace_debug_interval,
             pipe_level=args.pipeopt,
