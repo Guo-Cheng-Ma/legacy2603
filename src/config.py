@@ -220,7 +220,12 @@ def make_xpu_config(gpu_type: GPUType,
                     flops=None,
                     mem_cap=None,
                     mem_bw=None,
-                    power_constraint=True):
+                    power_constraint=True,
+                    num_pim_die=0):
+    TOTAL_HBM_DIES = 5
+    raw_hbm_dies = TOTAL_HBM_DIES - num_pim_die
+    raw_hbm_ratio = raw_hbm_dies / TOTAL_HBM_DIES
+
     config = {'GPU': {}, 'CPU': {}}
     config['GPU']["GPUTYPE"] = gpu_type
     config['GPU']["NUM_DEVICE"] = 8 if num_gpu is None else num_gpu
@@ -230,10 +235,10 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 108
         config['GPU']["FLOPS_PER_DEVICE"] = 312 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 80 * 1024 * 1024 * 1024 \
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 16 * 1024 * 1024 * 1024 * raw_hbm_dies \
                                                     if mem_cap is None else mem_cap
 
-        config['GPU']["OFF_MEM_BW_PER_DEVICE"] = 3352 * 1000 * 1000 * 1000 \
+        config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
                                                   if mem_bw is None else mem_bw
         config['GPU']["L2_MEM_BW_PER_DEVICE"] = float('inf')
         #config['GPU']["L2_MEM_BW_PER_DEVICE"] = 3.8 * 1000 * 1000 * 1000 * 1000
@@ -259,9 +264,9 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 132
         config['GPU']["FLOPS_PER_DEVICE"] = 989.4 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 80 * 1024 * 1024 * 1024 \
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 16 * 1024 * 1024 * 1024 * raw_hbm_dies \
                                                    if mem_cap is None else mem_cap
-        config['GPU']["OFF_MEM_BW_PER_DEVICE"] = 3352 * 1000 * 1000 * 1000 \
+        config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
                                                  if mem_bw is None else mem_bw
         config['GPU']["L2_MEM_BW_PER_DEVICE"] = float('inf')
         # 5.5TB/s, https://chipsandcheese.com/2023/07/02/nvidias-h100-funny-l2-and-tons-of-bandwidth/
@@ -314,7 +319,7 @@ def make_pim_config(pim_type: PIMType,
                     interface_type: InterfaceType,
                     opb=1,
                     num_attacc=8,
-                    num_hbm=5,
+                    num_pim_die=5,
                     bw_scale=None,
                     power_constraint=False):
     config = {}
@@ -325,12 +330,12 @@ def make_pim_config(pim_type: PIMType,
     internal_bandwidth_scale =  BW_SCALE[power_constraint][pim_type] \
                                 if bw_scale is None else bw_scale
     config["NUM_ATTACC"] = num_attacc
-    config["NUM_HBM"] = num_hbm
-    config["MEM_CAPACITY_PER_HBM"] = 16 * 1024 * 1024 * 1024
+    config["NUM_PIM_DIE"] = num_pim_die
+    config["MEM_CAPACITY_PER_PIM_DIE"] = 16 * 1024 * 1024 * 1024
     config[
-        "MEM_BW_PER_HBM"] = 670.4 * 1000 * 1000 * 1000 * internal_bandwidth_scale
-    config["FLOPS_PER_HBM"] = config["MEM_BW_PER_HBM"] * opb
-    config["SOFTMAX_MEM_BW"] = 670.4 * 1000 * 1000 * 1000 * num_hbm
+        "MEM_BW_PER_PIM_DIE"] = 670.4 * 1000 * 1000 * 1000 * internal_bandwidth_scale
+    config["FLOPS_PER_PIM_DIE"] = config["MEM_BW_PER_PIM_DIE"] * opb
+    config["SOFTMAX_MEM_BW"] = 670.4 * 1000 * 1000 * 1000 * num_pim_die
     config["SOFTMAX_FLOPS"] = config["SOFTMAX_MEM_BW"]
 
     if interface_type == InterfaceType.NVLINK3:
@@ -360,7 +365,6 @@ def make_model_config(name, dtype):
     model_table['MT-530B'] = [105, 20480, 128, 160, 4, 1]
     model_table['MT-1008B'] = [128, 25600, 160, 160, 4, 1]
     model_table['OPT-66B'] = [64, 9216, 72, 128, 4, 1]
-
     model_table["Qwen3-4B"] = [36, 2560, 32, 128, 3.8, 4]
     model_table["Qwen3-32B"] = [64, 5120, 64, 128, 5.0, 8]
     model_table["Mistral-Devstral2-123B"] = [80, 12288, 96, 128, 3.25, 16]

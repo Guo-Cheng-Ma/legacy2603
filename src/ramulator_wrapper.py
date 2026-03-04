@@ -21,13 +21,13 @@ class Ramulator:
                  ramulator_dir,
                  output_log='',
                  fast_mode=False,
-                 num_hbm=5):
+                 num_pim_die=5):
         self.df = pd.DataFrame()
         self.ramulator_dir = ramulator_dir
         self.output_log = output_log
         self.df = self._load_cache_df(output_log)
         self.tCK = 0.769  # ns
-        self.num_hbm = num_hbm
+        self.num_pim_die = num_pim_die
         self.nhead = modelinfos['num_heads']
         self.dhead = modelinfos['dhead']
         self.fast_mode = fast_mode
@@ -234,19 +234,19 @@ class Ramulator:
             dhead = self.dhead
             dbyte = layer.dbyte
             num_ops_per_attacc = layer.numOp
-            num_ops_per_hbm = math.ceil(num_ops_per_attacc / self.num_hbm)
+            num_ops_per_pim_die = math.ceil(num_ops_per_attacc / self.num_pim_die)
             num_ops_group = 1
             if self.fast_mode:
                 minimum_heads = 64
-                num_ops_group = math.ceil(num_ops_per_hbm / minimum_heads)
-                num_ops_per_hbm = minimum_heads
+                num_ops_group = math.ceil(num_ops_per_pim_die / minimum_heads)
+                num_ops_per_pim_die = minimum_heads
 
             file_name = "attacc_l{}_nattn{}_dhead{}_dbyte{}_pc{}".format(
-                l, num_ops_per_hbm, dhead, layer.dbyte, int(power_constraint))
+                l, num_ops_per_pim_die, dhead, layer.dbyte, int(power_constraint))
             yaml_file = os.path.join(self.ramulator_dir, file_name + '.yaml')
             self.make_yaml_file(yaml_file, file_name, power_constraint)
 
-            result = self.run_ramulator(pim_type, l, num_ops_per_hbm,
+            result = self.run_ramulator(pim_type, l, num_ops_per_pim_die,
                                         layer.dbyte, yaml_file, file_name)
 
             # remove yaml
@@ -276,14 +276,14 @@ class Ramulator:
             ## update log file
 
             log = [
-                l, num_ops_per_hbm, dhead, dbyte, pim_type.name,
+                l, num_ops_per_pim_die, dhead, dbyte, pim_type.name,
                 power_constraint
             ] + result
             self.update_log_file(log)
 
             ## si, tsv, giomux to bgmux, bgmux to column decoder, bank RD
             traffic = [si_io, tsv_io, giomux_io, bgmux_io, mem_acc]
-            traffic = [i * self.num_hbm for i in traffic]
+            traffic = [i * self.num_pim_die for i in traffic]
             traffic = [i * num_ops_group for i in traffic]
             exec_time = self.tCK * cycle / 1000 / 1000 / 1000  # ns -> s
             return exec_time, traffic
@@ -296,17 +296,17 @@ class Ramulator:
             self.run(pim_type, layer, power_constraint)
 
         num_ops_per_attacc = layer.numOp
-        num_ops_per_hbm = math.ceil(num_ops_per_attacc / self.num_hbm)
+        num_ops_per_pim_die = math.ceil(num_ops_per_attacc / self.num_pim_die)
         num_ops_group = 1
         if self.fast_mode:
             minimum_heads = 64
-            num_ops_group = math.ceil(num_ops_per_hbm / minimum_heads)
-            num_ops_per_hbm = minimum_heads
+            num_ops_group = math.ceil(num_ops_per_pim_die / minimum_heads)
+            num_ops_per_pim_die = minimum_heads
 
         l = layer.n
         dhead = layer.k
         dbyte = layer.dbyte
-        row = self.df[(self.df['L'] == l) & (self.df['nhead'] == num_ops_per_hbm) & \
+        row = self.df[(self.df['L'] == l) & (self.df['nhead'] == num_ops_per_pim_die) & \
                       (self.df['dbyte'] == dbyte) & (self.df['dhead'] == dhead) & \
                       (self.df['power_constraint'] == power_constraint) &  \
                       (self.df['pim_type'] == pim_type.name)]
@@ -345,7 +345,7 @@ class Ramulator:
 
             ## si, tsv, giomux to bgmux, bgmux to column decoder, bank RD
             traffic = [si_io, tsv_io, giomux_io, bgmux_io, mem_acc]
-            traffic = [i * self.num_hbm for i in traffic]
+            traffic = [i * self.num_pim_die for i in traffic]
             traffic = [i * num_ops_group for i in traffic]
             exec_time = self.tCK * cycle / 1000 / 1000 / 1000  # ns -> s
             exec_time *= num_ops_group

@@ -42,7 +42,8 @@ class System:
     def set_accelerator(self, modelinfos, name: DeviceType, config):
         self.hetero_name = name
         if self.hetero_name == DeviceType.PIM:
-            ramulator = Ramulator(modelinfos, "ramulator2", "ramulator.out")
+            ramulator = Ramulator(modelinfos, "ramulator2", "ramulator.out",
+                                  num_pim_die=config.get('NUM_PIM_DIE', 5))
             self.devices['Acc'] = PIM(config,
                                       self.scaling_factor,
                                       ramulator)

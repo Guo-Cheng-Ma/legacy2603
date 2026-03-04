@@ -299,14 +299,14 @@ class PIM:
     def __init__(self, config, scaling_factor, ramulator):
         self.name = DeviceType.PIM
         self.num_attacc = config['NUM_ATTACC']
-        self.num_hbm = config['NUM_HBM']
+        self.num_pim_die = config['NUM_PIM_DIE']
         self.pim_type = config['PIM_TYPE']
-        self.peak_memory_bandwidth = config['MEM_BW_PER_HBM'] * self.num_hbm
+        self.peak_memory_bandwidth = config['MEM_BW_PER_PIM_DIE'] * self.num_pim_die
         self.softmax_peak_flops = config['SOFTMAX_FLOPS']
         self.softmax_peak_bandwidth = config['SOFTMAX_MEM_BW']
         self.max_interface_bandwidth = config['INTERFACE_BW']
         self.aggregate_memory_capacity = config[
-            'MEM_CAPACITY_PER_HBM'] * self.num_attacc * self.num_hbm
+            'MEM_CAPACITY_PER_PIM_DIE'] * self.num_attacc * self.num_pim_die
         self.energy_table = config['ENERGY_TABLE']
         self.io_energy_table = self.energy_table['io']
         self.power_constraint = config['POWER_CONSTRAINT']

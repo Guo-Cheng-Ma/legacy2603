@@ -99,8 +99,8 @@ def main():
                         help="number of GPUs in DGX system. default=8")
     parser.add_argument("--gmemcap",
                         type=int,
-                        default=80,
-                        help="memory capacity per GPU (GB). default=80")
+                        default=None,
+                        help="memory capacity per GPU (GB). default=auto from die count")
 
 
 
@@ -109,6 +109,10 @@ def main():
                         type=str,
                         default='bank',
                         help="pim mode. list: bank, bg, buffer")
+    parser.add_argument("--num-pim-die",
+                        type=int,
+                        default=5,
+                        help="HBM-PIM dies per GPU (0-5 out of 5 total)")
     parser.add_argument("--powerlimit",
                         action='store_true',
                         help="power constraint for PIM ")
@@ -204,7 +208,8 @@ def main():
             args.system, args.gpu, args.ngpu,
             [args.lin, args.lout, args.batch]))
     num_gpu = args.ngpu
-    gmem_cap = args.gmemcap * 1024 * 1024 * 1024
+    gmem_cap = args.gmemcap * 1024 * 1024 * 1024 if args.gmemcap is not None else None
+    num_pim_die = args.num_pim_die if args.system == 'dgx-attacc' else 0
     output_path = "output.csv"
     if os.path.exists(output_path):
         os.remove(output_path)
@@ -212,7 +217,8 @@ def main():
     # set system
     dtype = DataType.W16A16 if args.word == 2 else DataType.W8A8
     modelinfos = make_model_config(args.model, dtype)
-    xpu_config = make_xpu_config(gpu_device, num_gpu=num_gpu, mem_cap=gmem_cap)
+    xpu_config = make_xpu_config(gpu_device, num_gpu=num_gpu, mem_cap=gmem_cap,
+                                  num_pim_die=num_pim_die)
     system = System(xpu_config['GPU'], modelinfos)
     if args.system in ['dgx-attacc']:
         if args.pim == "bg":
@@ -223,6 +229,7 @@ def main():
             pim_type = PIMType.BA
         pim_config = make_pim_config(pim_type,
                                      InterfaceType.NVLINK3,
+                                     num_pim_die=num_pim_die,
                                      power_constraint=args.powerlimit)
         system.set_accelerator(modelinfos, DeviceType.PIM, pim_config)
 
