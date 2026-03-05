@@ -4,6 +4,7 @@ import copy
 SCALING_FACTOR = {}
 SCALING_FACTOR['MAX_COMPUTE_UTIL'] = 0.8
 SCALING_FACTOR['MAX_OFF_MEM_BW_UTIL'] = 0.85
+VSTACK_CAPACITY_RATIO = 0.75
 
 # Heterogeneous 3-tier KV cache architecture defaults.
 # Prefer providing these via YAML in trace mode (`--kv-arch-config`).
@@ -221,10 +222,19 @@ def make_xpu_config(gpu_type: GPUType,
                     mem_cap=None,
                     mem_bw=None,
                     power_constraint=True,
-                    num_pim_die=0):
+                    num_pim_die=0,
+                    die_type='attacc'):
     TOTAL_HBM_DIES = 5
-    raw_hbm_dies = TOTAL_HBM_DIES - num_pim_die
-    raw_hbm_ratio = raw_hbm_dies / TOTAL_HBM_DIES
+    if die_type == 'vstack':
+        # All 5 dies are hybrid: GPU reads all channels at full BW,
+        # each die has reduced capacity due to PIM logic area.
+        raw_hbm_dies = TOTAL_HBM_DIES
+        raw_hbm_ratio = 1.0
+        capacity_per_die_bytes = int(16 * 1024 * 1024 * 1024 * VSTACK_CAPACITY_RATIO)
+    else:  # attacc
+        raw_hbm_dies = TOTAL_HBM_DIES - num_pim_die
+        raw_hbm_ratio = raw_hbm_dies / TOTAL_HBM_DIES
+        capacity_per_die_bytes = 16 * 1024 * 1024 * 1024
 
     config = {'GPU': {}, 'CPU': {}}
     config['GPU']["GPUTYPE"] = gpu_type
@@ -235,7 +245,7 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 108
         config['GPU']["FLOPS_PER_DEVICE"] = 312 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 16 * 1024 * 1024 * 1024 * raw_hbm_dies \
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_die_bytes * raw_hbm_dies \
                                                     if mem_cap is None else mem_cap
 
         config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
@@ -264,7 +274,7 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 132
         config['GPU']["FLOPS_PER_DEVICE"] = 989.4 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = 16 * 1024 * 1024 * 1024 * raw_hbm_dies \
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_die_bytes * raw_hbm_dies \
                                                    if mem_cap is None else mem_cap
         config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
                                                  if mem_bw is None else mem_bw
@@ -321,7 +331,8 @@ def make_pim_config(pim_type: PIMType,
                     num_attacc=8,
                     num_pim_die=5,
                     bw_scale=None,
-                    power_constraint=False):
+                    power_constraint=False,
+                    die_type='attacc'):
     config = {}
     config["PIM_TYPE"] = pim_type
     config["POWER_CONSTRAINT"] = power_constraint
@@ -331,7 +342,10 @@ def make_pim_config(pim_type: PIMType,
                                 if bw_scale is None else bw_scale
     config["NUM_ATTACC"] = num_attacc
     config["NUM_PIM_DIE"] = num_pim_die
-    config["MEM_CAPACITY_PER_PIM_DIE"] = 16 * 1024 * 1024 * 1024
+    if die_type == 'vstack':
+        config["MEM_CAPACITY_PER_PIM_DIE"] = int(16 * 1024 * 1024 * 1024 * VSTACK_CAPACITY_RATIO)
+    else:
+        config["MEM_CAPACITY_PER_PIM_DIE"] = 16 * 1024 * 1024 * 1024
     config[
         "MEM_BW_PER_PIM_DIE"] = 670.4 * 1000 * 1000 * 1000 * internal_bandwidth_scale
     config["FLOPS_PER_PIM_DIE"] = config["MEM_BW_PER_PIM_DIE"] * opb

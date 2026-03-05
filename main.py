@@ -113,6 +113,11 @@ def main():
                         type=int,
                         default=5,
                         help="HBM-PIM dies per GPU (0-5 out of 5 total)")
+    parser.add_argument("--die-type",
+                        type=str,
+                        default='attacc',
+                        choices=['attacc', 'vstack'],
+                        help="die architecture: attacc (dedicated PIM dies) or vstack (hybrid all-die)")
     parser.add_argument("--powerlimit",
                         action='store_true',
                         help="power constraint for PIM ")
@@ -200,16 +205,25 @@ def main():
         assert 0
 
     if args.system == 'dgx-attacc':
-        print("{}: ({} x {}), PIM:{}, [Lin, Lout, batch]: {}".format(
-            args.system, args.gpu, args.ngpu, args.pim,
+        die_type = args.die_type
+        if die_type == 'vstack':
+            num_pim_die = 5  # all dies are hybrid
+        else:
+            num_pim_die = args.num_pim_die
+            if num_pim_die >= 5:
+                parser.error("attacc mode requires num_pim_die < 5 (GPU needs at least 1 HBM die for BW); "
+                             "use --die-type vstack for all-hybrid dies")
+        print("{}: ({} x {}), PIM:{}, die-type:{}, [Lin, Lout, batch]: {}".format(
+            args.system, args.gpu, args.ngpu, args.pim, die_type,
             [args.lin, args.lout, args.batch]))
     else:
+        num_pim_die = 0
+        die_type = 'attacc'  # non-PIM system, ignore die_type
         print("{}: ({} x {}), [Lin, Lout, batch]: {}".format(
             args.system, args.gpu, args.ngpu,
             [args.lin, args.lout, args.batch]))
     num_gpu = args.ngpu
     gmem_cap = args.gmemcap * 1024 * 1024 * 1024 if args.gmemcap is not None else None
-    num_pim_die = args.num_pim_die if args.system == 'dgx-attacc' else 0
     output_path = "output.csv"
     if os.path.exists(output_path):
         os.remove(output_path)
@@ -218,7 +232,7 @@ def main():
     dtype = DataType.W16A16 if args.word == 2 else DataType.W8A8
     modelinfos = make_model_config(args.model, dtype)
     xpu_config = make_xpu_config(gpu_device, num_gpu=num_gpu, mem_cap=gmem_cap,
-                                  num_pim_die=num_pim_die)
+                                  num_pim_die=num_pim_die, die_type=die_type)
     system = System(xpu_config['GPU'], modelinfos)
     if args.system in ['dgx-attacc']:
         if args.pim == "bg":
@@ -230,7 +244,8 @@ def main():
         pim_config = make_pim_config(pim_type,
                                      InterfaceType.NVLINK3,
                                      num_pim_die=num_pim_die,
-                                     power_constraint=args.powerlimit)
+                                     power_constraint=args.powerlimit,
+                                     die_type=die_type)
         system.set_accelerator(modelinfos, DeviceType.PIM, pim_config)
 
     elif args.system in ['dgx-cpu']:
