@@ -1,4 +1,5 @@
 from src.type import *
+import argparse
 import copy
 
 SCALING_FACTOR = {}
@@ -66,27 +67,66 @@ def _parse_simple_yaml_map(yaml_text: str) -> dict:
         ):
             parsed = value[1:-1]
         else:
-            try:
-                parsed = int(value)
-            except ValueError:
+            low = value.lower()
+            if low in ('true', 'yes'):
+                parsed = True
+            elif low in ('false', 'no'):
+                parsed = False
+            else:
                 try:
-                    parsed = float(value)
+                    parsed = int(value)
                 except ValueError:
-                    parsed = value
+                    try:
+                        parsed = float(value)
+                    except ValueError:
+                        parsed = value
 
         target = root[section] if raw.startswith(' ') and section else root
         target[key] = parsed
     return root
 
 
-def load_hetero_kv_arch_config(yaml_path: str = None) -> dict:
-    """Load heterogeneous KV architecture config from YAML with defaults."""
-    cfg = copy.deepcopy(DEFAULT_HETERO_KV_ARCH)
-    if yaml_path is None:
-        return cfg
+# ---------------------------------------------------------------------------
+# Unified config: single YAML replaces all CLI arguments + kv_arch.yaml
+# ---------------------------------------------------------------------------
+_UNIFIED_DEFAULTS = {
+    # system
+    'system': 'dgx',
+    'gpu': 'A100a',
+    'ngpu': 8,
+    'gmemcap': None,
+    # pim
+    'pim': 'bank',
+    'num_pim_die': 5,
+    'die_type': 'attacc',
+    'powerlimit': False,
+    'ffopt': False,
+    'pipeopt': False,
+    # model
+    'model': 'GPT-175B',
+    'word': 2,
+    # workload
+    'mode': 'fixed',
+    'lin': 2048,
+    'lout': 128,
+    'batch': 1,
+    # trace
+    'trace_file': 'llm-req-inputs/qwen_thinking_blksz_16.jsonl',
+    'max_batch_size': 16,
+    'prefill_chunk_tokens': 128,
+    'trace_scheduler': 'continuous',
+    'timestamp_scaling': 1.0,
+    'trace_debug': False,
+    'trace_debug_interval': 100,
+    # kv_arch (sentinel: None means use DEFAULT_HETERO_KV_ARCH)
+    'kv_arch_config': None,
+}
 
-    with open(yaml_path, 'r', encoding='utf-8') as handle:
-        text = handle.read()
+
+def load_unified_config(yaml_path: str) -> argparse.Namespace:
+    """Load unified YAML config and return an argparse.Namespace with all settings."""
+    with open(yaml_path, 'r', encoding='utf-8') as f:
+        text = f.read()
 
     try:
         import yaml
@@ -94,7 +134,64 @@ def load_hetero_kv_arch_config(yaml_path: str = None) -> dict:
     except ImportError:
         parsed = _parse_simple_yaml_map(text)
 
-    root = parsed.get("kv_arch", parsed)
+    cfg = dict(_UNIFIED_DEFAULTS)
+
+    # Flatten known sections into cfg
+    for section_name in ('system', 'pim', 'model', 'workload', 'trace'):
+        section = parsed.get(section_name, {})
+        if isinstance(section, dict):
+            for key, value in section.items():
+                if key in cfg:
+                    cfg[key] = value
+
+    # kv_arch section: pass inline dict so load_hetero_kv_arch_config can consume it
+    kv_section = parsed.get('kv_arch', None)
+    if isinstance(kv_section, dict) and kv_section:
+        cfg['kv_arch_config'] = kv_section
+    # else: remains None -> will use DEFAULT_HETERO_KV_ARCH
+
+    # Type coercions
+    cfg['ngpu'] = int(cfg['ngpu'])
+    cfg['num_pim_die'] = int(cfg['num_pim_die'])
+    cfg['word'] = int(cfg['word'])
+    cfg['lin'] = int(cfg['lin'])
+    cfg['lout'] = int(cfg['lout'])
+    cfg['batch'] = int(cfg['batch'])
+    cfg['max_batch_size'] = int(cfg['max_batch_size'])
+    cfg['prefill_chunk_tokens'] = int(cfg['prefill_chunk_tokens'])
+    cfg['trace_debug_interval'] = int(cfg['trace_debug_interval'])
+    cfg['timestamp_scaling'] = float(cfg['timestamp_scaling'])
+    cfg['powerlimit'] = bool(cfg['powerlimit'])
+    cfg['ffopt'] = bool(cfg['ffopt'])
+    cfg['pipeopt'] = bool(cfg['pipeopt'])
+    cfg['trace_debug'] = bool(cfg['trace_debug'])
+    if cfg['gmemcap'] is not None:
+        cfg['gmemcap'] = int(cfg['gmemcap'])
+
+    return argparse.Namespace(**cfg)
+
+
+def load_hetero_kv_arch_config(yaml_path=None) -> dict:
+    """Load heterogeneous KV architecture config from YAML path, inline dict, or defaults."""
+    cfg = copy.deepcopy(DEFAULT_HETERO_KV_ARCH)
+    if yaml_path is None:
+        return cfg
+
+    # Accept a pre-parsed dict (from unified config's kv_arch section)
+    if isinstance(yaml_path, dict):
+        root = yaml_path
+    else:
+        with open(yaml_path, 'r', encoding='utf-8') as handle:
+            text = handle.read()
+
+        try:
+            import yaml
+            parsed = yaml.safe_load(text) or {}
+        except ImportError:
+            parsed = _parse_simple_yaml_map(text)
+
+        root = parsed.get("kv_arch", parsed)
+
     if not isinstance(root, dict):
         raise ValueError("kv arch YAML must be a map or contain a `kv_arch` map")
 

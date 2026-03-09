@@ -1,0 +1,31 @@
+# vStack test config
+system:
+  system: dgx-attacc
+  gpu: A100a
+  ngpu: 8
+
+pim:
+  pim: bank
+  die_type: vstack
+  powerlimit: false
+  ffopt: false
+  pipeopt: false
+
+model:
+  model: GPT-175B
+  word: 2
+
+workload:
+  mode: fixed
+  lin: 2048
+  lout: 128
+  batch: 1
+
+kv_arch:
+  num_cards: 8
+  gpu_mem_per_card_gb: 60
+  hispeed_kv_per_card_gb: 20
+  hicap_total_per_card_gb: 40
+  host_kv_total_gb: 512
+  dma_bandwidth_gbps: 1676
+  pcie_bandwidth_gbps: 64

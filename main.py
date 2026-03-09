@@ -77,121 +77,16 @@ def _trace_output_paths(trace_file: str, dtype_tag: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Model configuration",
+        description="AttAcc Simulator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-    ## set system configuration
     parser.add_argument(
-        "--system",
+        "--config",
         type=str,
-        default="dgx",
-        help="dgx (each GPU has 80GB HBM), \
-              dgx-cpu (In dgx, offloading the attention layer to cpu), \
-              dgx-attacc (dgx + attacc)")
-    parser.add_argument(
-        "--gpu",
-        type=str,
-        default='A100a',
-        help="GPU type (A100a and H100), A100a is A100 with HBM3")
-    parser.add_argument("--ngpu",
-                        type=int,
-                        default=8,
-                        help="number of GPUs in DGX system. default=8")
-    parser.add_argument("--gmemcap",
-                        type=int,
-                        default=None,
-                        help="memory capacity per GPU (GB). default=auto from die count")
+        default='configs/default.yaml',
+        help="path to unified YAML config file")
 
-
-
-    ## set attacc configuration
-    parser.add_argument("--pim",
-                        type=str,
-                        default='bank',
-                        help="pim mode. list: bank, bg, buffer")
-    parser.add_argument("--num-pim-die",
-                        type=int,
-                        default=5,
-                        help="HBM-PIM dies per GPU (0-5 out of 5 total)")
-    parser.add_argument("--die-type",
-                        type=str,
-                        default='attacc',
-                        choices=['attacc', 'vstack'],
-                        help="die architecture: attacc (dedicated PIM dies) or vstack (hybrid all-die)")
-    parser.add_argument("--powerlimit",
-                        action='store_true',
-                        help="power constraint for PIM ")
-    parser.add_argument("--ffopt",
-                        action='store_true',
-                        help="apply feedforward parallel optimization")
-    parser.add_argument("--pipeopt",
-                        action='store_true',
-                        help="apply pipeline optimization ")
-
-    ## set model and service environment
-    parser.add_argument(
-        "--model",
-        type=str,
-        default='GPT-175B',
-        help="model list: GPT-175B, LLAMA-65B, MT-530B, OPT-66B")
-    parser.add_argument("--word",
-                        type=int,
-                        default='2',
-                        help="word size (precision): 1(INT8), 2(FP16)")
-    parser.add_argument("--lin",
-                        type=int,
-                        default=2048,
-                        help="input sequence length")
-    parser.add_argument("--lout",
-                        type=int,
-                        default=128,
-                        help="number of generated tokens")
-    parser.add_argument(
-        "--batch",
-        type=int,
-        default=1,
-        help=
-        "batch size, default = 1"
-    )
-    parser.add_argument("--mode",
-                        type=str,
-                        default='fixed',
-                        choices=['fixed', 'trace'],
-                        help="simulation mode")
-    parser.add_argument("--trace-file",
-                        type=str,
-                        default='llm-req-inputs/qwen_thinking_blksz_16.jsonl',
-                        help="trace jsonl file for trace mode")
-    parser.add_argument("--max-batch-size",
-                        type=int,
-                        default=16,
-                        help="max active requests in trace mode")
-    parser.add_argument("--prefill-chunk-tokens",
-                        type=int,
-                        default=128,
-                        help="chunk size for prefill micro-step in trace mode")
-    parser.add_argument("--kv-arch-config",
-                        type=str,
-                        default='configs/kv_arch.yaml',
-                        help="YAML file for 3-tier KV architecture/capacity/bandwidth settings")
-    parser.add_argument("--trace-debug",
-                        action='store_true',
-                        help="enable detailed trace-mode debug logs")
-    parser.add_argument("--trace-debug-interval",
-                        type=int,
-                        default=100,
-                        help="print scheduler summary every N trace steps")
-    parser.add_argument("--trace-scheduler",
-                        type=str,
-                        default='continuous',
-                        choices=['continuous', 'static'],
-                        help="trace scheduler policy: continuous backfill or static batching")
-    parser.add_argument("--timestamp-scaling",
-                        type=float,
-                        default=1.0,
-                        help="multiply all input request timestamps in trace mode")
-
-    args = parser.parse_args()
+    cli_args = parser.parse_args()
+    args = load_unified_config(cli_args.config)
 
     global RAMULATOR
     if RAMULATOR:
@@ -211,8 +106,9 @@ def main():
         else:
             num_pim_die = args.num_pim_die
             if num_pim_die >= 5:
-                parser.error("attacc mode requires num_pim_die < 5 (GPU needs at least 1 HBM die for BW); "
-                             "use --die-type vstack for all-hybrid dies")
+                print("ERROR: attacc mode requires num_pim_die < 5 (GPU needs at least 1 HBM die for BW); "
+                      "use die_type: vstack for all-hybrid dies")
+                raise SystemExit(1)
         print("{}: ({} x {}), PIM:{}, die-type:{}, [Lin, Lout, batch]: {}".format(
             args.system, args.gpu, args.ngpu, args.pim, die_type,
             [args.lin, args.lout, args.batch]))

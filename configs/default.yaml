@@ -1,0 +1,44 @@
+# AttAcc Simulator - Unified Configuration
+# Usage: python main.py --config configs/default.yaml
+
+system:
+  system: dgx                  # dgx, dgx-cpu, dgx-attacc
+  gpu: A100a                   # A100a, H100
+  ngpu: 8
+  # gmemcap:                   # omit for auto from die count
+
+pim:
+  pim: bank                    # bank, bg, buffer
+  num_pim_die: 5               # HBM-PIM dies per GPU (0-4 for attacc)
+  die_type: attacc             # attacc (dedicated PIM dies), vstack (hybrid all-die)
+  powerlimit: false
+  ffopt: false
+  pipeopt: false
+
+model:
+  model: GPT-175B
+  word: 2                      # 1=INT8, 2=FP16
+
+workload:
+  mode: fixed                  # fixed, trace
+  lin: 2048
+  lout: 128
+  batch: 1
+
+trace:
+  trace_file: "llm-req-inputs/qwen_thinking_blksz_16.jsonl"
+  max_batch_size: 16
+  prefill_chunk_tokens: 128
+  trace_scheduler: continuous  # continuous, static
+  timestamp_scaling: 1.0
+  trace_debug: false
+  trace_debug_interval: 100
+
+kv_arch:
+  num_cards: 8
+  gpu_mem_per_card_gb: 60
+  hispeed_kv_per_card_gb: 20   # L1 (compute layers)
+  hicap_total_per_card_gb: 40  # L2 (weights + KV)
+  host_kv_total_gb: 512        # L3 host spill tier
+  dma_bandwidth_gbps: 1676
+  pcie_bandwidth_gbps: 64

@@ -1,0 +1,19 @@
+# attacc test with illegal num_pim_die=5
+system:
+  system: dgx-attacc
+  gpu: A100a
+
+pim:
+  pim: bank
+  num_pim_die: 5
+  die_type: attacc
+
+model:
+  model: GPT-175B
+  word: 2
+
+workload:
+  mode: fixed
+  lin: 2048
+  lout: 128
+  batch: 1
