@@ -1,7 +1,21 @@
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional, Tuple
+
+
+class KVTier(str, Enum):
+    L1 = "L1"
+    L2 = "L2"
+    L3 = "L3"
+
+
+@dataclass(frozen=True)
+class KVLocation:
+    tier: KVTier
+    card: Optional[int] = None
+    die: Optional[int] = None
+    bank: Optional[int] = None
 
 
 @dataclass
@@ -13,15 +27,20 @@ class KVCacheStats:
     misses: int = 0
     inserts: int = 0
     evictions: int = 0
+    same_die_l1_to_l1: int = 0
+    cross_die_l1_to_l1: int = 0
     l1_to_l2: int = 0
+    same_die_l1_to_l2: int = 0
+    cross_die_l1_to_l2: int = 0
+    cross_card_l1_to_l2: int = 0
     l2_to_l3: int = 0
+    cross_die_l2_to_l2: int = 0
+    cross_card_l2_to_l2: int = 0
     l3_drops: int = 0
-
-
-class KVTier(str, Enum):
-    L1 = "L1"
-    L2 = "L2"
-    L3 = "L3"
+    callback_same_die: int = 0
+    callback_cross_die: int = 0
+    callback_cross_card: int = 0
+    callback_l3_to_l1: int = 0
 
 
 @dataclass
@@ -29,11 +48,26 @@ class KVAccessResult:
     is_hit: bool = False
     hit_tier: Optional[KVTier] = None
     inserted: bool = False
-    promoted_from_l2: int = 0
-    promoted_from_l3: int = 0
-    l1_to_l2: int = 0
+    same_die_l1_to_l1: int = 0
+    cross_die_l1_to_l1: int = 0
+    same_die_l1_to_l2: int = 0
+    cross_die_l1_to_l2: int = 0
+    cross_card_l1_to_l2: int = 0
+    cross_die_l2_to_l2: int = 0
+    cross_card_l2_to_l2: int = 0
     l2_to_l3: int = 0
     l3_drops: int = 0
+    callback_same_die: int = 0
+    callback_cross_die: int = 0
+    callback_cross_card: int = 0
+    callback_from_l3: int = 0
+    migration_bytes: int = 0
+    callback_time_s: float = 0.0
+    eviction_time_s: float = 0.0
+    same_die_time_s: float = 0.0
+    cross_die_time_s: float = 0.0
+    cross_card_time_s: float = 0.0
+    pcie_time_s: float = 0.0
 
     @property
     def l1_hit(self) -> int:
@@ -48,315 +82,563 @@ class KVAccessResult:
         return 1 if self.hit_tier == KVTier.L3 else 0
 
     @property
+    def l1_to_l2(self) -> int:
+        return self.same_die_l1_to_l2 + self.cross_die_l1_to_l2 + self.cross_card_l1_to_l2
+
+    @property
     def dma_blocks(self) -> int:
-        # L1<->L2 movement.
-        return self.l1_to_l2 + self.promoted_from_l2
+        return self.same_die_l1_to_l1 + self.same_die_l1_to_l2 + self.callback_same_die
 
     @property
     def pcie_blocks(self) -> int:
-        # L2<->L3 and L3->L1 movement.
-        return self.l2_to_l3 + self.promoted_from_l3
+        return self.l2_to_l3 + self.callback_from_l3
 
     @property
     def migration_blocks(self) -> int:
-        return self.dma_blocks + self.pcie_blocks
+        return int(self.migration_bytes > 0) if self.migration_bytes <= 0 else int(self.migration_bytes)
 
 
 class KVCacheManager:
-    """
-    Global hash-id KV cache with 3-tier LRU state.
-
-    `access(hash_id)` applies tier transitions and always tries to leave the block in L1.
-    """
+    """Topology-aware KV cache with L1 at (card, die, bank), L2 at (card, die), and global L3."""
 
     def __init__(
         self,
-        capacity_bytes: int,
         kv_bytes_per_block: int,
-        l1_capacity_bytes: Optional[int] = None,
-        l2_capacity_bytes: int = 0,
-        l3_capacity_bytes: int = 0,
+        topology: dict,
         spare_ratio: float = 0.01,
     ):
-        if capacity_bytes < 0 and l1_capacity_bytes is None:
-            raise ValueError("capacity_bytes must be >= 0 when l1 capacity is not set")
         if kv_bytes_per_block <= 0:
             raise ValueError("kv_bytes_per_block must be > 0")
-
-        l1_capacity = int(capacity_bytes) if l1_capacity_bytes is None else int(l1_capacity_bytes)
-        if l1_capacity < 0 or int(l2_capacity_bytes) < 0 or int(l3_capacity_bytes) < 0:
-            raise ValueError("tier capacities must be >= 0")
         if float(spare_ratio) < 0.0 or float(spare_ratio) >= 1.0:
             raise ValueError("spare_ratio must be in [0.0, 1.0)")
 
         self.kv_bytes_per_block = int(kv_bytes_per_block)
         self.spare_ratio = float(spare_ratio)
-        self._capacity: Dict[KVTier, int] = {
-            KVTier.L1: l1_capacity,
-            KVTier.L2: int(l2_capacity_bytes),
-            KVTier.L3: int(l3_capacity_bytes),
-        }
-        self._tiers: Dict[KVTier, OrderedDict] = {
-            KVTier.L1: OrderedDict(),
-            KVTier.L2: OrderedDict(),
-            KVTier.L3: OrderedDict(),
-        }
-        self._used: Dict[KVTier, int] = {
-            KVTier.L1: 0,
-            KVTier.L2: 0,
-            KVTier.L3: 0,
-        }
+        self.num_cards = int(topology["num_cards"])
+        self.num_die_packages_per_card = int(topology["num_die_packages_per_card"])
+        self.banks_per_die = int(topology["banks_per_die"])
+        self.l1_die_ids = tuple(int(v) for v in topology["l1_die_ids"])
+        self.l2_die_ids = tuple(int(v) for v in topology["l2_die_ids"])
+        self.l1_bank_capacity_bytes = int(topology["l1_bank_capacity_bytes"])
+        self.l2_die_capacity_bytes = int(topology["l2_kv_die_capacity_bytes"])
+        self.l3_capacity_bytes = int(topology["l3_kv_bytes"])
+        self.card_total_bw_bps = float(topology["card_total_bw_bps"])
+        self.nvlink_bw_bps = float(topology["nvlink_bw_bps"])
+        self.dma_bw_bps = float(topology["dma_bw_bps"])
+        self.pcie_bw_bps = float(topology["pcie_bw_bps"])
 
-        self.capacity_bytes = sum(self._capacity.values())
+        self._l1_banks: Dict[Tuple[int, int, int], OrderedDict] = {}
+        self._l1_used: Dict[Tuple[int, int, int], int] = {}
+        for card in range(self.num_cards):
+            for die in self.l1_die_ids:
+                for bank in range(self.banks_per_die):
+                    key = (card, die, bank)
+                    self._l1_banks[key] = OrderedDict()
+                    self._l1_used[key] = 0
+
+        self._l2_dies: Dict[Tuple[int, int], OrderedDict] = {}
+        self._l2_used: Dict[Tuple[int, int], int] = {}
+        for card in range(self.num_cards):
+            for die in self.l2_die_ids:
+                key = (card, die)
+                self._l2_dies[key] = OrderedDict()
+                self._l2_used[key] = 0
+
+        self._l3 = OrderedDict()
+        self._l3_used = 0
+        self._locations: Dict[int, KVLocation] = {}
+
         self.stats = KVCacheStats()
+        self._l1_total_capacity_bytes = len(self._l1_banks) * self.l1_bank_capacity_bytes
+        self._l2_total_capacity_bytes = len(self._l2_dies) * self.l2_die_capacity_bytes
+        self.capacity_bytes = self._l1_total_capacity_bytes + self._l2_total_capacity_bytes + self.l3_capacity_bytes
+
+    @property
+    def used_bytes(self) -> int:
+        return sum(self._l1_used.values()) + sum(self._l2_used.values()) + self._l3_used
 
     @property
     def free_bytes(self) -> int:
         return self.capacity_bytes - self.used_bytes
 
-    @property
-    def used_bytes(self) -> int:
-        return sum(self._used.values())
-
     def tier_used_bytes(self, tier: KVTier) -> int:
-        return self._used[tier]
+        if tier == KVTier.L1:
+            return sum(self._l1_used.values())
+        if tier == KVTier.L2:
+            return sum(self._l2_used.values())
+        return self._l3_used
 
     def tier_capacity_bytes(self, tier: KVTier) -> int:
-        return self._capacity[tier]
+        if tier == KVTier.L1:
+            return self._l1_total_capacity_bytes
+        if tier == KVTier.L2:
+            return self._l2_total_capacity_bytes
+        return self.l3_capacity_bytes
 
-    def _effective_capacity(self, tier: KVTier) -> int:
-        cap = self._capacity[tier]
-        reserve = int(cap * self.spare_ratio)
-        threshold = cap - reserve
-        if cap >= self.kv_bytes_per_block:
+    def _effective_capacity(self, capacity_bytes: int) -> int:
+        reserve = int(capacity_bytes * self.spare_ratio)
+        threshold = capacity_bytes - reserve
+        if capacity_bytes >= self.kv_bytes_per_block:
             threshold = max(threshold, self.kv_bytes_per_block)
         return max(threshold, 0)
 
-    def _pop_lru(self, tier: KVTier) -> Optional[int]:
-        entries = self._tiers[tier]
-        if not entries:
-            return None
-        hash_id, _ = entries.popitem(last=False)
-        self._used[tier] -= self.kv_bytes_per_block
-        return hash_id
+    def _l1_capacity_threshold(self) -> int:
+        return self._effective_capacity(self.l1_bank_capacity_bytes)
 
-    def _remove_if_exists(self, hash_id: int, tier: KVTier) -> bool:
-        entries = self._tiers[tier]
-        if hash_id not in entries:
-            return False
-        del entries[hash_id]
-        self._used[tier] -= self.kv_bytes_per_block
-        return True
+    def _l2_capacity_threshold(self) -> int:
+        return self._effective_capacity(self.l2_die_capacity_bytes)
 
-    def locate(self, hash_id: int) -> Optional[KVTier]:
-        for tier in [KVTier.L1, KVTier.L2, KVTier.L3]:
-            if hash_id in self._tiers[tier]:
-                return tier
-        return None
+    def _l3_capacity_threshold(self) -> int:
+        return self._effective_capacity(self.l3_capacity_bytes)
 
-    def _place_in_l3(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._effective_capacity(KVTier.L3)
-        if cap < self.kv_bytes_per_block:
-            self.stats.evictions += 1
-            self.stats.l3_drops += 1
-            if result is not None:
-                result.l3_drops += 1
-            return False
+    def assign_request_home(self, req_id: int) -> Tuple[int, int]:
+        if not self.l1_die_ids:
+            return 0, 0
+        home_card = req_id % self.num_cards
+        die_idx = (req_id // self.num_cards) % len(self.l1_die_ids)
+        return home_card, self.l1_die_ids[die_idx]
 
-        while self._used[KVTier.L3] + self.kv_bytes_per_block > cap:
-            victim = self._pop_lru(KVTier.L3)
-            if victim is None:
-                break
-            self.stats.evictions += 1
-            self.stats.l3_drops += 1
-            if result is not None:
-                result.l3_drops += 1
+    def bank_for_hash(self, hash_id: int) -> int:
+        return int(hash_id % self.banks_per_die)
 
-        if self._used[KVTier.L3] + self.kv_bytes_per_block > cap:
-            return False
+    def _valid_l1_bank_key(self, card: int, die: int, bank: int) -> bool:
+        return (card, die, bank) in self._l1_banks
 
-        self._tiers[KVTier.L3][hash_id] = True
-        self._used[KVTier.L3] += self.kv_bytes_per_block
-        return True
+    def _valid_l2_die_key(self, card: int, die: int) -> bool:
+        return (card, die) in self._l2_dies
 
-    def _place_in_l2(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._effective_capacity(KVTier.L2)
-        if cap < self.kv_bytes_per_block:
-            return self._place_in_l3(hash_id, result=result)
+    def locate(self, hash_id: int) -> Optional[KVLocation]:
+        return self._locations.get(hash_id)
 
-        while self._used[KVTier.L2] + self.kv_bytes_per_block > cap:
-            victim = self._pop_lru(KVTier.L2)
-            if victim is None:
-                break
-            self.stats.evictions += 1
-            self.stats.l2_to_l3 += 1
-            if result is not None:
-                result.l2_to_l3 += 1
-            self._place_in_l3(victim, result=result)
+    def has(self, hash_id: int) -> bool:
+        return hash_id in self._locations
 
-        if self._used[KVTier.L2] + self.kv_bytes_per_block > cap:
-            return self._place_in_l3(hash_id, result=result)
+    def _movement_time_s(self, src: KVLocation, dst: KVLocation) -> float:
+        bytes_size = self.kv_bytes_per_block
+        per_die_bw = (self.card_total_bw_bps / self.num_die_packages_per_card) if self.num_die_packages_per_card > 0 else 0.0
 
-        self._tiers[KVTier.L2][hash_id] = True
-        self._used[KVTier.L2] += self.kv_bytes_per_block
-        return True
+        if src.tier == KVTier.L3 or dst.tier == KVTier.L3:
+            return (bytes_size / self.pcie_bw_bps) if self.pcie_bw_bps > 0 else 0.0
+        if src.card == dst.card:
+            if src.die == dst.die:
+                return (2.0 * bytes_size / self.dma_bw_bps) if self.dma_bw_bps > 0 else 0.0
+            return (2.0 * bytes_size / per_die_bw) if per_die_bw > 0 else 0.0
+        if per_die_bw <= 0 or self.nvlink_bw_bps <= 0:
+            return 0.0
+        return (bytes_size / per_die_bw) + (bytes_size / self.nvlink_bw_bps) + (bytes_size / per_die_bw)
 
-    def _place_in_l1(self, hash_id: int, result: Optional[KVAccessResult] = None) -> bool:
-        cap = self._effective_capacity(KVTier.L1)
-        if cap < self.kv_bytes_per_block:
-            return False
+    def _record_transfer(self, result: KVAccessResult, src: KVLocation, dst: KVLocation, is_callback: bool) -> None:
+        time_s = self._movement_time_s(src, dst)
+        result.migration_bytes += self.kv_bytes_per_block
+        if src.tier == KVTier.L3 or dst.tier == KVTier.L3:
+            result.pcie_time_s += time_s
+        elif src.card == dst.card and src.die == dst.die:
+            result.same_die_time_s += time_s
+        elif src.card == dst.card:
+            result.cross_die_time_s += time_s
+        else:
+            result.cross_card_time_s += time_s
 
-        while self._used[KVTier.L1] + self.kv_bytes_per_block > cap:
-            victim = self._pop_lru(KVTier.L1)
-            if victim is None:
-                break
-            self.stats.evictions += 1
-            self.stats.l1_to_l2 += 1
-            if result is not None:
-                result.l1_to_l2 += 1
-            self._place_in_l2(victim, result=result)
+        if is_callback:
+            result.callback_time_s += time_s
+        else:
+            result.eviction_time_s += time_s
 
-        if self._used[KVTier.L1] + self.kv_bytes_per_block > cap:
-            return False
+    def _record_move(self, src: KVLocation, dst: KVLocation, result: KVAccessResult, is_callback: bool = False) -> None:
+        self._record_transfer(result, src, dst, is_callback=is_callback)
 
-        self._tiers[KVTier.L1][hash_id] = True
-        self._used[KVTier.L1] += self.kv_bytes_per_block
-        return True
-
-    def probe(self, hash_id: int) -> bool:
-        """Compatibility API: hit test without tier promotions."""
-        tier = self.locate(hash_id)
-        if tier is not None:
-            self.stats.hits += 1
-            if tier == KVTier.L1:
-                self.stats.l1_hits += 1
-            elif tier == KVTier.L2:
-                self.stats.l2_hits += 1
+        if is_callback:
+            if src.tier == KVTier.L3:
+                self.stats.callback_l3_to_l1 += 1
+                result.callback_from_l3 += 1
+                return
+            if src.card == dst.card and src.die == dst.die:
+                self.stats.callback_same_die += 1
+                result.callback_same_die += 1
+            elif src.card == dst.card:
+                self.stats.callback_cross_die += 1
+                result.callback_cross_die += 1
             else:
-                self.stats.l3_hits += 1
-            self._tiers[tier].move_to_end(hash_id)
-            return True
-        self.stats.misses += 1
-        return False
+                self.stats.callback_cross_card += 1
+                result.callback_cross_card += 1
+            return
 
-    def access(self, hash_id: int) -> KVAccessResult:
-        """
-        Main API for continuous scheduler.
-        - hit in L1: reuse directly.
-        - hit in L2/L3: promote to L1 and apply cascading evictions.
-        - miss: insert as newly computed block into L1.
-        """
+        self.stats.evictions += 1
+        if src.tier == KVTier.L1 and dst.tier == KVTier.L1:
+            if src.card == dst.card and src.die == dst.die:
+                self.stats.same_die_l1_to_l1 += 1
+                result.same_die_l1_to_l1 += 1
+            else:
+                self.stats.cross_die_l1_to_l1 += 1
+                result.cross_die_l1_to_l1 += 1
+            return
+        if src.tier == KVTier.L1 and dst.tier == KVTier.L2:
+            self.stats.l1_to_l2 += 1
+            if src.card == dst.card and src.die == dst.die:
+                self.stats.same_die_l1_to_l2 += 1
+                result.same_die_l1_to_l2 += 1
+            elif src.card == dst.card:
+                self.stats.cross_die_l1_to_l2 += 1
+                result.cross_die_l1_to_l2 += 1
+            else:
+                self.stats.cross_card_l1_to_l2 += 1
+                result.cross_card_l1_to_l2 += 1
+            return
+        if src.tier == KVTier.L2 and dst.tier == KVTier.L2:
+            if src.card == dst.card:
+                self.stats.cross_die_l2_to_l2 += 1
+                result.cross_die_l2_to_l2 += 1
+            else:
+                self.stats.cross_card_l2_to_l2 += 1
+                result.cross_card_l2_to_l2 += 1
+            return
+        if src.tier == KVTier.L2 and dst.tier == KVTier.L3:
+            self.stats.l2_to_l3 += 1
+            result.l2_to_l3 += 1
+
+    def _remove(self, hash_id: int, location: KVLocation) -> None:
+        if location.tier == KVTier.L1:
+            key = (location.card, location.die, location.bank)
+            if hash_id in self._l1_banks[key]:
+                del self._l1_banks[key][hash_id]
+                self._l1_used[key] -= self.kv_bytes_per_block
+        elif location.tier == KVTier.L2:
+            key = (location.card, location.die)
+            if hash_id in self._l2_dies[key]:
+                del self._l2_dies[key][hash_id]
+                self._l2_used[key] -= self.kv_bytes_per_block
+        else:
+            if hash_id in self._l3:
+                del self._l3[hash_id]
+                self._l3_used -= self.kv_bytes_per_block
+        self._locations.pop(hash_id, None)
+
+    def _insert_l1_bank(self, hash_id: int, bank_key: Tuple[int, int, int]) -> None:
+        self._l1_banks[bank_key][hash_id] = True
+        self._l1_used[bank_key] += self.kv_bytes_per_block
+        self._locations[hash_id] = KVLocation(KVTier.L1, bank_key[0], bank_key[1], bank_key[2])
+
+    def _insert_l2_die(self, hash_id: int, die_key: Tuple[int, int]) -> None:
+        self._l2_dies[die_key][hash_id] = True
+        self._l2_used[die_key] += self.kv_bytes_per_block
+        self._locations[hash_id] = KVLocation(KVTier.L2, die_key[0], die_key[1], None)
+
+    def _insert_l3(self, hash_id: int) -> bool:
+        cap = self._l3_capacity_threshold()
+        if cap < self.kv_bytes_per_block:
+            return False
+        while self._l3_used + self.kv_bytes_per_block > cap:
+            victim_hash, _ = self._l3.popitem(last=False)
+            self._locations.pop(victim_hash, None)
+            self._l3_used -= self.kv_bytes_per_block
+            self.stats.evictions += 1
+            self.stats.l3_drops += 1
+        self._l3[hash_id] = True
+        self._l3_used += self.kv_bytes_per_block
+        self._locations[hash_id] = KVLocation(KVTier.L3, None, None, None)
+        return True
+
+    def _candidate_sort_key(self, source: KVLocation, candidate: KVLocation) -> Tuple[float, int, int, int, int]:
+        score = self._movement_time_s(source, candidate) + self._movement_time_s(candidate, source)
+        tier_priority = {KVTier.L1: 0, KVTier.L2: 1, KVTier.L3: 2}[candidate.tier]
+        return (
+            score,
+            tier_priority,
+            -1 if candidate.card is None else candidate.card,
+            -1 if candidate.die is None else candidate.die,
+            -1 if candidate.bank is None else candidate.bank,
+        )
+
+    def _l1_bank_has_space(self, bank_key: Tuple[int, int, int]) -> bool:
+        return self._l1_used[bank_key] + self.kv_bytes_per_block <= self._l1_capacity_threshold()
+
+    def _l2_die_has_space(self, die_key: Tuple[int, int]) -> bool:
+        return self._l2_used[die_key] + self.kv_bytes_per_block <= self._l2_capacity_threshold()
+
+    def _l1_candidates(
+        self,
+        card: int,
+        die: int,
+        include_same_die: bool,
+        include_cross_die: bool,
+        exclude_bank: Optional[Tuple[int, int, int]] = None,
+    ) -> Iterable[KVLocation]:
+        for bank_key in self._l1_banks.keys():
+            bank_card, bank_die, bank_idx = bank_key
+            if bank_card != card:
+                continue
+            if exclude_bank is not None and bank_key == exclude_bank:
+                continue
+            if bank_die == die and not include_same_die:
+                continue
+            if bank_die != die and not include_cross_die:
+                continue
+            if self._l1_bank_has_space(bank_key):
+                yield KVLocation(KVTier.L1, bank_card, bank_die, bank_idx)
+
+    def _same_card_l2_candidates(self, card: int, preferred_die: Optional[int] = None) -> Iterable[KVLocation]:
+        ordered = []
+        if preferred_die is not None and self._valid_l2_die_key(card, preferred_die):
+            ordered.append((card, preferred_die))
+        for die_key in self._l2_dies.keys():
+            if die_key[0] != card:
+                continue
+            if preferred_die is not None and die_key[1] == preferred_die:
+                continue
+            ordered.append(die_key)
+        for die_key in ordered:
+            if self._l2_die_has_space(die_key):
+                yield KVLocation(KVTier.L2, die_key[0], die_key[1], None)
+
+    def _cross_card_l2_candidates(self, card: int) -> Iterable[KVLocation]:
+        for die_key in self._l2_dies.keys():
+            if die_key[0] == card:
+                continue
+            if self._l2_die_has_space(die_key):
+                yield KVLocation(KVTier.L2, die_key[0], die_key[1], None)
+
+    def _select_l1_victim_destination(self, source: KVLocation) -> KVLocation:
+        candidates = []
+        exclude_bank = (source.card, source.die, source.bank)
+        candidates.extend(
+            self._l1_candidates(
+                source.card,
+                source.die,
+                include_same_die=True,
+                include_cross_die=False,
+                exclude_bank=exclude_bank,
+            )
+        )
+        candidates.extend(self._same_card_l2_candidates(source.card, preferred_die=source.die))
+        candidates.extend(
+            self._l1_candidates(
+                source.card,
+                source.die,
+                include_same_die=False,
+                include_cross_die=True,
+                exclude_bank=exclude_bank,
+            )
+        )
+        candidates.extend(self._same_card_l2_candidates(source.card, preferred_die=None))
+        candidates.extend(self._cross_card_l2_candidates(source.card))
+        if self._l3_capacity_threshold() >= self.kv_bytes_per_block:
+            candidates.append(KVLocation(KVTier.L3, None, None, None))
+        if not candidates:
+            return KVLocation(KVTier.L3, None, None, None)
+        return min(candidates, key=lambda candidate: self._candidate_sort_key(source, candidate))
+
+    def _select_l2_victim_destination(self, source: KVLocation) -> KVLocation:
+        candidates = list(self._same_card_l2_candidates(source.card, preferred_die=None))
+        candidates = [candidate for candidate in candidates if candidate.die != source.die]
+        candidates.extend(self._cross_card_l2_candidates(source.card))
+        if self._l3_capacity_threshold() >= self.kv_bytes_per_block:
+            candidates.append(KVLocation(KVTier.L3, None, None, None))
+        if not candidates:
+            return KVLocation(KVTier.L3, None, None, None)
+        return min(candidates, key=lambda candidate: self._candidate_sort_key(source, candidate))
+
+    def _move_hash_to_candidate(self, hash_id: int, source: KVLocation, candidate: KVLocation, result: KVAccessResult) -> bool:
+        if candidate.tier == KVTier.L1:
+            bank_key = (candidate.card, candidate.die, candidate.bank)
+            if not self._l1_bank_has_space(bank_key):
+                return False
+            self._insert_l1_bank(hash_id, bank_key)
+        elif candidate.tier == KVTier.L2:
+            die_key = (candidate.card, candidate.die)
+            if not self._l2_die_has_space(die_key):
+                return False
+            self._insert_l2_die(hash_id, die_key)
+        else:
+            if not self._insert_l3(hash_id):
+                self.stats.l3_drops += 1
+                result.l3_drops += 1
+                return False
+        self._record_move(source, candidate, result, is_callback=False)
+        return True
+
+    def _evict_from_l1_bank(self, bank_key: Tuple[int, int, int], result: KVAccessResult) -> bool:
+        entries = self._l1_banks[bank_key]
+        if not entries:
+            return False
+        victim_hash, _ = entries.popitem(last=False)
+        self._l1_used[bank_key] -= self.kv_bytes_per_block
+        source = KVLocation(KVTier.L1, bank_key[0], bank_key[1], bank_key[2])
+        self._locations.pop(victim_hash, None)
+        candidate = self._select_l1_victim_destination(source)
+        return self._move_hash_to_candidate(victim_hash, source, candidate, result)
+
+    def _evict_from_l2_die(self, die_key: Tuple[int, int], result: KVAccessResult) -> bool:
+        entries = self._l2_dies[die_key]
+        if not entries:
+            return False
+        victim_hash, _ = entries.popitem(last=False)
+        self._l2_used[die_key] -= self.kv_bytes_per_block
+        source = KVLocation(KVTier.L2, die_key[0], die_key[1], None)
+        self._locations.pop(victim_hash, None)
+        candidate = self._select_l2_victim_destination(source)
+        return self._move_hash_to_candidate(victim_hash, source, candidate, result)
+
+    def _ensure_l1_bank_space(self, bank_key: Tuple[int, int, int], result: KVAccessResult) -> bool:
+        cap = self._l1_capacity_threshold()
+        if cap < self.kv_bytes_per_block:
+            return False
+        while self._l1_used[bank_key] + self.kv_bytes_per_block > cap:
+            if not self._evict_from_l1_bank(bank_key, result):
+                break
+        return self._l1_used[bank_key] + self.kv_bytes_per_block <= cap
+
+    def _ensure_l2_die_space(self, die_key: Tuple[int, int], result: KVAccessResult) -> bool:
+        cap = self._l2_capacity_threshold()
+        if cap < self.kv_bytes_per_block:
+            return False
+        while self._l2_used[die_key] + self.kv_bytes_per_block > cap:
+            if not self._evict_from_l2_die(die_key, result):
+                break
+        return self._l2_used[die_key] + self.kv_bytes_per_block <= cap
+
+    def _callback_to_l1(self, hash_id: int, source: KVLocation, target_card: int, target_die: int, result: KVAccessResult) -> bool:
+        target_bank_key = (target_card, target_die, self.bank_for_hash(hash_id))
+        if not self._valid_l1_bank_key(*target_bank_key):
+            return False
+        if not self._ensure_l1_bank_space(target_bank_key, result):
+            return False
+        self._insert_l1_bank(hash_id, target_bank_key)
+        self._record_move(source, KVLocation(KVTier.L1, target_card, target_die, target_bank_key[2]), result, is_callback=True)
+        return True
+
+    def access(self, hash_id: int, target_card: Optional[int] = None, target_die: Optional[int] = None) -> KVAccessResult:
         result = KVAccessResult()
-        tier = self.locate(hash_id)
-        if tier == KVTier.L1:
+        location = self.locate(hash_id)
+
+        if target_card is None or target_die is None:
+            target_card, target_die = self.assign_request_home(hash_id)
+
+        if location is None:
+            self.stats.misses += 1
+            target_bank_key = (target_card, target_die, self.bank_for_hash(hash_id))
+            if self._valid_l1_bank_key(*target_bank_key) and self._ensure_l1_bank_space(target_bank_key, result):
+                self._insert_l1_bank(hash_id, target_bank_key)
+                self.stats.inserts += 1
+                result.inserted = True
+            return result
+
+        if location.tier == KVTier.L1:
             self.stats.hits += 1
             self.stats.l1_hits += 1
             result.is_hit = True
             result.hit_tier = KVTier.L1
-            self._tiers[KVTier.L1].move_to_end(hash_id)
+            bank_key = (location.card, location.die, location.bank)
+            self._l1_banks[bank_key].move_to_end(hash_id)
             return result
 
-        if tier == KVTier.L2:
+        if location.tier == KVTier.L2:
             self.stats.hits += 1
             self.stats.l2_hits += 1
             result.is_hit = True
             result.hit_tier = KVTier.L2
-            self._remove_if_exists(hash_id, KVTier.L2)
-            if self._place_in_l1(hash_id, result=result):
-                result.promoted_from_l2 = 1
-            else:
-                self._place_in_l2(hash_id, result=result)
+            self._remove(hash_id, location)
+            if not self._callback_to_l1(hash_id, location, target_card, target_die, result):
+                self._insert_l2_die(hash_id, (location.card, location.die))
             return result
 
-        if tier == KVTier.L3:
-            self.stats.hits += 1
-            self.stats.l3_hits += 1
-            result.is_hit = True
-            result.hit_tier = KVTier.L3
-            self._remove_if_exists(hash_id, KVTier.L3)
-            if self._place_in_l1(hash_id, result=result):
-                result.promoted_from_l3 = 1
-            else:
-                self._place_in_l3(hash_id, result=result)
-            return result
-
-        self.stats.misses += 1
-        if self._place_in_l1(hash_id, result=result):
-            self.stats.inserts += 1
-            result.inserted = True
+        self.stats.hits += 1
+        self.stats.l3_hits += 1
+        result.is_hit = True
+        result.hit_tier = KVTier.L3
+        self._remove(hash_id, location)
+        if not self._callback_to_l1(hash_id, location, target_card, target_die, result):
+            self._insert_l3(hash_id)
         return result
 
     def touch(self, hash_id: int) -> bool:
-        tier = self.locate(hash_id)
-        if tier is None:
+        location = self.locate(hash_id)
+        if location is None:
             return False
-        self._tiers[tier].move_to_end(hash_id)
+        if location.tier == KVTier.L1:
+            self._l1_banks[(location.card, location.die, location.bank)].move_to_end(hash_id)
+        elif location.tier == KVTier.L2:
+            self._l2_dies[(location.card, location.die)].move_to_end(hash_id)
+        else:
+            self._l3.move_to_end(hash_id)
         return True
 
-    def has(self, hash_id: int) -> bool:
-        return self.locate(hash_id) is not None
+    def probe(self, hash_id: int) -> bool:
+        location = self.locate(hash_id)
+        if location is None:
+            self.stats.misses += 1
+            return False
+        self.stats.hits += 1
+        if location.tier == KVTier.L1:
+            self.stats.l1_hits += 1
+        elif location.tier == KVTier.L2:
+            self.stats.l2_hits += 1
+        else:
+            self.stats.l3_hits += 1
+        self.touch(hash_id)
+        return True
 
     def reserve_or_evict(self, required_bytes: int, tier: KVTier = KVTier.L1) -> int:
-        """Compatibility API used by legacy code paths."""
         if required_bytes <= 0:
             return 0
-        cap = self._effective_capacity(tier)
-        if required_bytes > cap:
-            return -1
+        cap = self.tier_capacity_bytes(tier)
+        return -1 if required_bytes > cap else 0
 
-        evicted = 0
-        while self._used[tier] + required_bytes > cap:
-            victim = self._pop_lru(tier)
-            if victim is None:
-                break
-            self.stats.evictions += 1
-            if tier == KVTier.L3:
-                self.stats.l3_drops += 1
-            evicted += 1
-
-        if self._used[tier] + required_bytes > cap:
-            return -1
-        return evicted
-
-    def insert(self, hash_id: int, tier: KVTier = KVTier.L1) -> bool:
-        """Compatibility API: explicit placement by tier."""
-        current_tier = self.locate(hash_id)
-        if current_tier is not None:
-            self._tiers[current_tier].move_to_end(hash_id)
+    def insert(
+        self,
+        hash_id: int,
+        tier: KVTier = KVTier.L1,
+        target_card: int = 0,
+        target_die: int = 0,
+    ) -> bool:
+        if self.has(hash_id):
+            self.touch(hash_id)
             return True
-
         result = KVAccessResult()
-        ok = False
         if tier == KVTier.L1:
-            ok = self._place_in_l1(hash_id, result=result)
-        elif tier == KVTier.L2:
-            ok = self._place_in_l2(hash_id, result=result)
-        else:
-            ok = self._place_in_l3(hash_id, result=result)
-
+            target_bank_key = (target_card, target_die, self.bank_for_hash(hash_id))
+            if not self._valid_l1_bank_key(*target_bank_key):
+                return False
+            if not self._ensure_l1_bank_space(target_bank_key, result):
+                return False
+            self._insert_l1_bank(hash_id, target_bank_key)
+            self.stats.inserts += 1
+            return True
+        if tier == KVTier.L2:
+            die_key = (target_card, target_die)
+            if not self._valid_l2_die_key(*die_key):
+                return False
+            if not self._ensure_l2_die_space(die_key, result):
+                return False
+            self._insert_l2_die(hash_id, die_key)
+            self.stats.inserts += 1
+            return True
+        ok = self._insert_l3(hash_id)
         if ok:
             self.stats.inserts += 1
         return ok
 
     def snapshot(self) -> dict:
+        l1_num_blocks = sum(len(entries) for entries in self._l1_banks.values())
+        l2_num_blocks = sum(len(entries) for entries in self._l2_dies.values())
+        l3_num_blocks = len(self._l3)
         return {
             "capacity_bytes": self.capacity_bytes,
             "used_bytes": self.used_bytes,
             "free_bytes": self.free_bytes,
-            "num_blocks": sum(len(v) for v in self._tiers.values()),
-            "l1_num_blocks": len(self._tiers[KVTier.L1]),
-            "l2_num_blocks": len(self._tiers[KVTier.L2]),
-            "l3_num_blocks": len(self._tiers[KVTier.L3]),
-            "l1_capacity_bytes": self._capacity[KVTier.L1],
-            "l2_capacity_bytes": self._capacity[KVTier.L2],
-            "l3_capacity_bytes": self._capacity[KVTier.L3],
-            "l1_effective_capacity_bytes": self._effective_capacity(KVTier.L1),
-            "l2_effective_capacity_bytes": self._effective_capacity(KVTier.L2),
-            "l3_effective_capacity_bytes": self._effective_capacity(KVTier.L3),
+            "num_blocks": l1_num_blocks + l2_num_blocks + l3_num_blocks,
+            "l1_num_blocks": l1_num_blocks,
+            "l2_num_blocks": l2_num_blocks,
+            "l3_num_blocks": l3_num_blocks,
+            "l1_capacity_bytes": self._l1_total_capacity_bytes,
+            "l2_capacity_bytes": self._l2_total_capacity_bytes,
+            "l3_capacity_bytes": self.l3_capacity_bytes,
+            "l1_effective_capacity_bytes": self._effective_capacity(self._l1_total_capacity_bytes),
+            "l2_effective_capacity_bytes": self._effective_capacity(self._l2_total_capacity_bytes),
+            "l3_effective_capacity_bytes": self._effective_capacity(self.l3_capacity_bytes),
             "spare_ratio": self.spare_ratio,
-            "l1_used_bytes": self._used[KVTier.L1],
-            "l2_used_bytes": self._used[KVTier.L2],
-            "l3_used_bytes": self._used[KVTier.L3],
+            "l1_used_bytes": sum(self._l1_used.values()),
+            "l2_used_bytes": sum(self._l2_used.values()),
+            "l3_used_bytes": self._l3_used,
             "hits": self.stats.hits,
             "l1_hits": self.stats.l1_hits,
             "l2_hits": self.stats.l2_hits,
@@ -364,7 +646,22 @@ class KVCacheManager:
             "misses": self.stats.misses,
             "inserts": self.stats.inserts,
             "evictions": self.stats.evictions,
+            "same_die_l1_to_l1": self.stats.same_die_l1_to_l1,
+            "cross_die_l1_to_l1": self.stats.cross_die_l1_to_l1,
             "l1_to_l2": self.stats.l1_to_l2,
+            "same_die_l1_to_l2": self.stats.same_die_l1_to_l2,
+            "cross_die_l1_to_l2": self.stats.cross_die_l1_to_l2,
+            "cross_card_l1_to_l2": self.stats.cross_card_l1_to_l2,
+            "cross_die_l2_to_l2": self.stats.cross_die_l2_to_l2,
+            "cross_card_l2_to_l2": self.stats.cross_card_l2_to_l2,
             "l2_to_l3": self.stats.l2_to_l3,
             "l3_drops": self.stats.l3_drops,
+            "callback_same_die": self.stats.callback_same_die,
+            "callback_cross_die": self.stats.callback_cross_die,
+            "callback_cross_card": self.stats.callback_cross_card,
+            "callback_l3_to_l1": self.stats.callback_l3_to_l1,
+            "banks_per_die": self.banks_per_die,
+            "num_die_packages_per_card": self.num_die_packages_per_card,
+            "l1_bank_capacity_bytes": self.l1_bank_capacity_bytes,
+            "l2_die_capacity_bytes": self.l2_die_capacity_bytes,
         }
