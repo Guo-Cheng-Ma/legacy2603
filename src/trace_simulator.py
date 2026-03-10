@@ -33,13 +33,24 @@ def _build_kv_cache(system, kv_arch_cfg: Dict) -> Tuple[KVCacheManager, Dict]:
     kv_bytes_per_block = kv_bytes_per_token * 16
     weight_bytes, _, _ = system.get_required_mem_capacity(batch_size=1, lin=1, lout=1)
     tier_caps = get_hetero_kv_capacities(weight_bytes_total=weight_bytes, hetero_kv_arch=kv_arch_cfg)
+    bw_cfg = get_hetero_transfer_bandwidths(kv_arch_cfg)
 
     cache = KVCacheManager(
-        capacity_bytes=max(tier_caps["l1_kv_bytes"], kv_bytes_per_block),
         kv_bytes_per_block=kv_bytes_per_block,
-        l1_capacity_bytes=max(tier_caps["l1_kv_bytes"], kv_bytes_per_block),
-        l2_capacity_bytes=tier_caps["l2_kv_bytes"],
-        l3_capacity_bytes=tier_caps["l3_kv_bytes"],
+        topology={
+            "num_cards": kv_arch_cfg["NUM_CARDS"],
+            "num_die_packages_per_card": tier_caps["num_die_packages_per_card"],
+            "banks_per_die": tier_caps["banks_per_die"],
+            "l1_die_ids": tier_caps["l1_die_ids"],
+            "l2_die_ids": tier_caps["l2_die_ids"],
+            "l1_bank_capacity_bytes": max(tier_caps["l1_bank_capacity_bytes"], kv_bytes_per_block),
+            "l2_kv_die_capacity_bytes": tier_caps["l2_kv_die_capacity_bytes"],
+            "l3_kv_bytes": tier_caps["l3_kv_bytes"],
+            "card_total_bw_bps": system.devices['GPU'].peak_memory_bandwidth,
+            "nvlink_bw_bps": system.devices['GPU'].max_interface_bandwidth,
+            "dma_bw_bps": bw_cfg["dma_bw_bps"],
+            "pcie_bw_bps": bw_cfg["pcie_bw_bps"],
+        },
     )
     return cache, tier_caps
 
@@ -270,6 +281,8 @@ def run_trace_simulation(
             'turn': req.trace.turn,
             'arrival_s': req.timestamp,
             'start_s': req.start_time,
+            'home_card': req.home_card,
+            'home_die': req.home_die,
             'batch_id': req.tags.get("batch_id"),
             'batch_start_s': req.tags.get("batch_start_s"),
             'batch_finish_s': req.tags.get("batch_finish_s"),
@@ -286,13 +299,23 @@ def run_trace_simulation(
             'l1_hit_blocks': req.l1_hit_blocks,
             'l2_hit_blocks': req.l2_hit_blocks,
             'l3_hit_blocks': req.l3_hit_blocks,
+            'same_die_l1_to_l1_blocks': req.same_die_l1_to_l1_blocks,
+            'cross_die_l1_to_l1_blocks': req.cross_die_l1_to_l1_blocks,
             'l1_to_l2_blocks': req.l1_to_l2_blocks,
+            'same_die_l1_to_l2_blocks': req.same_die_l1_to_l2_blocks,
+            'cross_die_l1_to_l2_blocks': req.cross_die_l1_to_l2_blocks,
+            'cross_card_l1_to_l2_blocks': req.cross_card_l1_to_l2_blocks,
+            'cross_die_l2_to_l2_blocks': req.cross_die_l2_to_l2_blocks,
+            'cross_card_l2_to_l2_blocks': req.cross_card_l2_to_l2_blocks,
             'l2_to_l3_blocks': req.l2_to_l3_blocks,
             'l3_drop_blocks': req.l3_drop_blocks,
             'migration_bytes': req.migration_bytes,
             'kv_hit_rate': (req.reused_blocks / kv_total) if kv_total > 0 else 0.0,
             'dma_blocks': req.dma_blocks,
-            'pcie_blocks': req.l2_to_l3_blocks + req.l3_hit_blocks,
+            'pcie_blocks': req.pcie_blocks,
+            'callback_same_die_blocks': req.callback_same_die_blocks,
+            'callback_cross_die_blocks': req.callback_cross_die_blocks,
+            'callback_cross_card_blocks': req.callback_cross_card_blocks,
         })
 
     summary = _summarize_requests(completed, snapshot.sim_time)
@@ -315,8 +338,13 @@ def run_trace_simulation(
     summary['kv_capacity_mode'] = "hetero_3tier"
     summary['kv_arch_config'] = kv_arch_config
     summary['num_cards_cfg'] = kv_arch_cfg["NUM_CARDS"]
+    summary['num_die_packages_per_card_cfg'] = kv_caps["num_die_packages_per_card"]
+    summary['banks_per_die_cfg'] = kv_caps["banks_per_die"]
     summary['dma_bw_bps_cfg'] = bw_cfg["dma_bw_bps"]
     summary['pcie_bw_bps_cfg'] = bw_cfg["pcie_bw_bps"]
+    summary['gpu_mem_per_card_gb_cfg'] = kv_caps["gpu_mem_per_card_gb"]
+    summary['hispeed_kv_per_card_gb_cfg'] = kv_caps["hispeed_kv_per_card_gb"]
+    summary['hicap_total_per_card_gb_cfg'] = kv_caps["hicap_total_per_card_gb"]
     summary['weight_reserved_bytes'] = kv_caps["weight_bytes_total"]
     summary['l1_kv_capacity_bytes_cfg'] = kv_caps["l1_kv_bytes"]
     summary['l2_total_bytes_cfg'] = kv_caps["l2_total_bytes"]
@@ -424,8 +452,13 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'kv_capacity_mode',
         'kv_arch_config',
         'num_cards_cfg',
+        'num_die_packages_per_card_cfg',
+        'banks_per_die_cfg',
         'dma_bw_bps_cfg',
         'pcie_bw_bps_cfg',
+        'gpu_mem_per_card_gb_cfg',
+        'hispeed_kv_per_card_gb_cfg',
+        'hicap_total_per_card_gb_cfg',
         'weight_reserved_bytes',
         'l1_kv_capacity_bytes_cfg',
         'l2_total_bytes_cfg',
@@ -502,12 +535,16 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'capacity_bytes',
         'dma_transfers',
         'pcie_transfers',
+        'cross_die_transfer_blocks',
+        'cross_card_transfer_blocks',
         'callback_dma_transfer_blocks',
         'callback_pcie_transfer_blocks',
         'eviction_dma_transfer_blocks',
         'eviction_pcie_transfer_blocks',
         'dma_time_s',
         'pcie_time_s',
+        'cross_die_time_s',
+        'cross_card_time_s',
         'migration_time_s',
         'callback_migration_time_s',
         'overlapped_eviction_time_s',
@@ -564,6 +601,8 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'turn',
         'arrival_s',
         'start_s',
+        'home_card',
+        'home_die',
         'batch_id',
         'batch_start_s',
         'batch_finish_s',
@@ -580,13 +619,23 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'l1_hit_blocks',
         'l2_hit_blocks',
         'l3_hit_blocks',
+        'same_die_l1_to_l1_blocks',
+        'cross_die_l1_to_l1_blocks',
         'l1_to_l2_blocks',
+        'same_die_l1_to_l2_blocks',
+        'cross_die_l1_to_l2_blocks',
+        'cross_card_l1_to_l2_blocks',
+        'cross_die_l2_to_l2_blocks',
+        'cross_card_l2_to_l2_blocks',
         'l2_to_l3_blocks',
         'l3_drop_blocks',
         'migration_bytes',
         'kv_hit_rate',
         'dma_blocks',
         'pcie_blocks',
+        'callback_same_die_blocks',
+        'callback_cross_die_blocks',
+        'callback_cross_card_blocks',
     ]
     with open(requests_path, 'w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=request_cols)

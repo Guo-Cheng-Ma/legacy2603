@@ -63,12 +63,21 @@ class StaticBatchScheduler:
         self.migration_bytes = 0
         self.callback_migration_time_s = 0.0
         self.overlapped_eviction_time_s = 0.0
+        self.cross_die_time_s = 0.0
+        self.cross_card_time_s = 0.0
+        self.cross_die_transfer_blocks = 0
+        self.cross_card_transfer_blocks = 0
 
         self.num_batches = 0
         self.total_batch_size = 0
         self.total_batch_max_output_tokens = 0
         self.total_decode_padded_tokens = 0
         self._next_batch_id = 0
+
+        if self.kv_cache is not None:
+            for req in self.requests:
+                if req.home_card is None or req.home_die is None:
+                    req.home_card, req.home_die = self.kv_cache.assign_request_home(req.req_id)
 
     def _log(self, message: str) -> None:
         if self.debug:
@@ -106,6 +115,13 @@ class StaticBatchScheduler:
         batch_callback_pcie_blocks = 0
         batch_eviction_dma_blocks = 0
         batch_eviction_pcie_blocks = 0
+        batch_callback_time_s = 0.0
+        batch_eviction_time_s = 0.0
+        batch_same_die_time_s = 0.0
+        batch_cross_die_time_s = 0.0
+        batch_cross_card_time_s = 0.0
+        batch_pcie_time_s = 0.0
+        batch_migration_bytes = 0
         for req in batch:
             req.set_state(RequestLifecycle.PREFILLING)
             req.start_time = self.sim_time
@@ -117,13 +133,27 @@ class StaticBatchScheduler:
             l1_hits = 0
             l2_hits = 0
             l3_hits = 0
+            same_die_l1_to_l1 = 0
+            cross_die_l1_to_l1 = 0
             l1_to_l2 = 0
             l2_to_l3 = 0
             l3_drop = 0
-            req_callback_dma_blocks = 0
-            req_callback_pcie_blocks = 0
-            req_eviction_dma_blocks = 0
-            req_eviction_pcie_blocks = 0
+            same_die_l1_to_l2 = 0
+            cross_die_l1_to_l2 = 0
+            cross_card_l1_to_l2 = 0
+            cross_die_l2_to_l2 = 0
+            cross_card_l2_to_l2 = 0
+            req_callback_same_die_blocks = 0
+            req_callback_cross_die_blocks = 0
+            req_callback_cross_card_blocks = 0
+            req_callback_from_l3_blocks = 0
+            req_callback_time_s = 0.0
+            req_eviction_time_s = 0.0
+            req_same_die_time_s = 0.0
+            req_cross_die_time_s = 0.0
+            req_cross_card_time_s = 0.0
+            req_pcie_time_s = 0.0
+            req_migration_bytes = 0
             for block_idx in range(int(math.ceil(req.input_length / 16.0))):
                 hash_id = req.trace.hash_ids[block_idx]
                 if self.kv_cache is None:
@@ -131,7 +161,7 @@ class StaticBatchScheduler:
                     missed_blocks += 1
                     continue
 
-                access = self.kv_cache.access(hash_id)
+                access = self.kv_cache.access(hash_id, target_card=req.home_card, target_die=req.home_die)
                 if self.debug and (access.hit_tier is not None and access.hit_tier != "L1"):
                     self._log(
                         "kv hit req={} hash_id={} tier={} promote_to_l1=yes".format(
@@ -140,44 +170,85 @@ class StaticBatchScheduler:
                             access.hit_tier,
                         )
                     )
-                if self.debug and (access.l1_to_l2 > 0 or access.l2_to_l3 > 0 or access.l3_drops > 0):
+                if self.debug and (
+                    access.same_die_l1_to_l1 > 0
+                    or access.cross_die_l1_to_l1 > 0
+                    or access.l1_to_l2 > 0
+                    or access.cross_die_l2_to_l2 > 0
+                    or access.cross_card_l2_to_l2 > 0
+                    or access.l2_to_l3 > 0
+                    or access.l3_drops > 0
+                ):
                     self._log(
-                        "kv evict req={} hash_id={} l1_to_l2={} l2_to_l3={} l3_drop={}".format(
+                        "kv evict req={} hash_id={} l1_to_l1=[same_die={},cross_die={}] l1_to_l2=[same_die={},cross_die={},cross_card={}] l2_to_l2=[cross_die={},cross_card={}] l2_to_l3={} l3_drop={}".format(
                             req.req_id,
                             hash_id,
-                            access.l1_to_l2,
+                            access.same_die_l1_to_l1,
+                            access.cross_die_l1_to_l1,
+                            access.same_die_l1_to_l2,
+                            access.cross_die_l1_to_l2,
+                            access.cross_card_l1_to_l2,
+                            access.cross_die_l2_to_l2,
+                            access.cross_card_l2_to_l2,
                             access.l2_to_l3,
                             access.l3_drops,
                         )
                     )
-                if self.debug and (access.dma_blocks > 0 or access.pcie_blocks > 0):
+                if self.debug and (access.migration_bytes > 0):
                     self._log(
-                        "kv xfer req={} hash_id={} dma_blocks={} pcie_blocks={}".format(
+                        "kv xfer req={} hash_id={} same_die_t={:.6e} cross_die_t={:.6e} cross_card_t={:.6e} pcie_t={:.6e}".format(
                             req.req_id,
                             hash_id,
-                            access.dma_blocks,
-                            access.pcie_blocks,
+                            access.same_die_time_s,
+                            access.cross_die_time_s,
+                            access.cross_card_time_s,
+                            access.pcie_time_s,
                         )
                     )
+                req.same_die_l1_to_l1_blocks += access.same_die_l1_to_l1
+                req.cross_die_l1_to_l1_blocks += access.cross_die_l1_to_l1
                 req.l1_hit_blocks += access.l1_hit
                 req.l2_hit_blocks += access.l2_hit
                 req.l3_hit_blocks += access.l3_hit
                 req.l1_to_l2_blocks += access.l1_to_l2
+                req.same_die_l1_to_l2_blocks += access.same_die_l1_to_l2
+                req.cross_die_l1_to_l2_blocks += access.cross_die_l1_to_l2
+                req.cross_card_l1_to_l2_blocks += access.cross_card_l1_to_l2
                 req.l2_to_l3_blocks += access.l2_to_l3
+                req.cross_die_l2_to_l2_blocks += access.cross_die_l2_to_l2
+                req.cross_card_l2_to_l2_blocks += access.cross_card_l2_to_l2
                 req.l3_drop_blocks += access.l3_drops
                 req.dma_blocks += access.dma_blocks
-                req.migration_bytes += access.migration_blocks * self.kv_cache.kv_bytes_per_block
+                req.pcie_blocks += access.pcie_blocks
+                req.callback_same_die_blocks += access.callback_same_die
+                req.callback_cross_die_blocks += access.callback_cross_die
+                req.callback_cross_card_blocks += access.callback_cross_card
+                req.migration_bytes += access.migration_bytes
 
                 l1_hits += access.l1_hit
                 l2_hits += access.l2_hit
                 l3_hits += access.l3_hit
+                same_die_l1_to_l1 += access.same_die_l1_to_l1
+                cross_die_l1_to_l1 += access.cross_die_l1_to_l1
                 l1_to_l2 += access.l1_to_l2
                 l2_to_l3 += access.l2_to_l3
                 l3_drop += access.l3_drops
-                req_callback_dma_blocks += access.promoted_from_l2
-                req_callback_pcie_blocks += access.promoted_from_l3
-                req_eviction_dma_blocks += access.l1_to_l2
-                req_eviction_pcie_blocks += access.l2_to_l3
+                same_die_l1_to_l2 += access.same_die_l1_to_l2
+                cross_die_l1_to_l2 += access.cross_die_l1_to_l2
+                cross_card_l1_to_l2 += access.cross_card_l1_to_l2
+                cross_die_l2_to_l2 += access.cross_die_l2_to_l2
+                cross_card_l2_to_l2 += access.cross_card_l2_to_l2
+                req_callback_same_die_blocks += access.callback_same_die
+                req_callback_cross_die_blocks += access.callback_cross_die
+                req_callback_cross_card_blocks += access.callback_cross_card
+                req_callback_from_l3_blocks += access.callback_from_l3
+                req_callback_time_s += access.callback_time_s
+                req_eviction_time_s += access.eviction_time_s
+                req_same_die_time_s += access.same_die_time_s
+                req_cross_die_time_s += access.cross_die_time_s
+                req_cross_card_time_s += access.cross_card_time_s
+                req_pcie_time_s += access.pcie_time_s
+                req_migration_bytes += access.migration_bytes
 
                 if access.is_hit:
                     req.reused_blocks += 1
@@ -190,90 +261,65 @@ class StaticBatchScheduler:
             req.set_state(RequestLifecycle.DECODING)
             miss_tokens = min(req.input_length, missed_blocks * 16)
             batch_max_miss_tokens = max(batch_max_miss_tokens, miss_tokens)
-            batch_callback_dma_blocks += req_callback_dma_blocks
-            batch_callback_pcie_blocks += req_callback_pcie_blocks
-            batch_eviction_dma_blocks += req_eviction_dma_blocks
-            batch_eviction_pcie_blocks += req_eviction_pcie_blocks
+            batch_callback_dma_blocks += req_callback_same_die_blocks
+            batch_callback_pcie_blocks += req_callback_from_l3_blocks
+            batch_eviction_dma_blocks += same_die_l1_to_l1 + same_die_l1_to_l2
+            batch_eviction_pcie_blocks += l2_to_l3
+            batch_callback_time_s += req_callback_time_s
+            batch_eviction_time_s += req_eviction_time_s
+            batch_same_die_time_s += req_same_die_time_s
+            batch_cross_die_time_s += req_cross_die_time_s
+            batch_cross_card_time_s += req_cross_card_time_s
+            batch_pcie_time_s += req_pcie_time_s
+            batch_migration_bytes += req_migration_bytes
+            self.cross_die_transfer_blocks += (
+                cross_die_l1_to_l1 + cross_die_l1_to_l2 + cross_die_l2_to_l2 + req_callback_cross_die_blocks
+            )
+            self.cross_card_transfer_blocks += (
+                cross_card_l1_to_l2 + cross_card_l2_to_l2 + req_callback_cross_card_blocks
+            )
             self._log(
-                "prefill req={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l2={},l2_to_l3={},l3_drop={}] xfer=[callback_dma={},callback_pcie={},evict_dma={},evict_pcie={}] progress={}/{}".format(
+                "prefill req={} hit={} miss={} hit_tiers=[{},{},{}] moves=[l1_to_l1_same_die={},l1_to_l1_cross_die={},l1_to_l2_same_die={},l1_to_l2_cross_die={},l1_to_l2_cross_card={},l2_to_l2_cross_die={},l2_to_l2_cross_card={},l2_to_l3={},l3_drop={}] xfer=[cb_same_die={},cb_cross_die={},cb_cross_card={},cb_l3={}] progress={}/{}".format(
                     req.req_id,
                     hit_blocks,
                     missed_blocks,
                     l1_hits,
                     l2_hits,
                     l3_hits,
-                    l1_to_l2,
+                    same_die_l1_to_l1,
+                    cross_die_l1_to_l1,
+                    same_die_l1_to_l2,
+                    cross_die_l1_to_l2,
+                    cross_card_l1_to_l2,
+                    cross_die_l2_to_l2,
+                    cross_card_l2_to_l2,
                     l2_to_l3,
                     l3_drop,
-                    req_callback_dma_blocks,
-                    req_callback_pcie_blocks,
-                    req_eviction_dma_blocks,
-                    req_eviction_pcie_blocks,
+                    req_callback_same_die_blocks,
+                    req_callback_cross_die_blocks,
+                    req_callback_cross_card_blocks,
+                    req_callback_from_l3_blocks,
                     req.prefill_progress_tokens,
                     req.input_length,
                 )
             )
 
         prefill_latency = 0.0
-        if self.system is not None and self.kv_cache is not None:
-            if batch_callback_dma_blocks > 0:
-                callback_dma_bytes = batch_callback_dma_blocks * self.kv_cache.kv_bytes_per_block
-                callback_dma_est = self.system.estimate_kv_dma(
-                    callback_dma_bytes,
-                    bw_bps=self.transfer_bw["dma_bw_bps"],
-                )
-                # Callback transfer latency (L2->L1) is non-overlapped penalty.
-                prefill_latency += callback_dma_est["latency"]
-                self.migration_time_s += callback_dma_est["latency"]
-                self.callback_migration_time_s += callback_dma_est["latency"]
-                self.dma_time_s += callback_dma_est["latency"]
-                self.migration_energy_nj += callback_dma_est["energy_nj"]
-                self.dma_energy_nj += callback_dma_est["energy_nj"]
-                self.dma_transfer_blocks += batch_callback_dma_blocks
-                self.callback_dma_transfer_blocks += batch_callback_dma_blocks
-                self.migration_bytes += callback_dma_bytes
-            if batch_eviction_dma_blocks > 0:
-                eviction_dma_bytes = batch_eviction_dma_blocks * self.kv_cache.kv_bytes_per_block
-                eviction_dma_est = self.system.estimate_kv_dma(
-                    eviction_dma_bytes,
-                    bw_bps=self.transfer_bw["dma_bw_bps"],
-                )
-                # Eviction transfer latency (L1->L2) is fully overlapped by policy.
-                self.overlapped_eviction_time_s += eviction_dma_est["latency"]
-                self.migration_energy_nj += eviction_dma_est["energy_nj"]
-                self.dma_energy_nj += eviction_dma_est["energy_nj"]
-                self.dma_transfer_blocks += batch_eviction_dma_blocks
-                self.eviction_dma_transfer_blocks += batch_eviction_dma_blocks
-                self.migration_bytes += eviction_dma_bytes
-            if batch_callback_pcie_blocks > 0:
-                callback_pcie_bytes = batch_callback_pcie_blocks * self.kv_cache.kv_bytes_per_block
-                callback_pcie_est = self.system.estimate_kv_pcie(
-                    callback_pcie_bytes,
-                    bw_bps=self.transfer_bw["pcie_bw_bps"],
-                )
-                # Callback transfer latency (L3->L1) is non-overlapped penalty.
-                prefill_latency += callback_pcie_est["latency"]
-                self.migration_time_s += callback_pcie_est["latency"]
-                self.callback_migration_time_s += callback_pcie_est["latency"]
-                self.pcie_time_s += callback_pcie_est["latency"]
-                self.migration_energy_nj += callback_pcie_est["energy_nj"]
-                self.pcie_energy_nj += callback_pcie_est["energy_nj"]
-                self.pcie_transfer_blocks += batch_callback_pcie_blocks
-                self.callback_pcie_transfer_blocks += batch_callback_pcie_blocks
-                self.migration_bytes += callback_pcie_bytes
-            if batch_eviction_pcie_blocks > 0:
-                eviction_pcie_bytes = batch_eviction_pcie_blocks * self.kv_cache.kv_bytes_per_block
-                eviction_pcie_est = self.system.estimate_kv_pcie(
-                    eviction_pcie_bytes,
-                    bw_bps=self.transfer_bw["pcie_bw_bps"],
-                )
-                # Eviction transfer latency (L2->L3) is fully overlapped by policy.
-                self.overlapped_eviction_time_s += eviction_pcie_est["latency"]
-                self.migration_energy_nj += eviction_pcie_est["energy_nj"]
-                self.pcie_energy_nj += eviction_pcie_est["energy_nj"]
-                self.pcie_transfer_blocks += batch_eviction_pcie_blocks
-                self.eviction_pcie_transfer_blocks += batch_eviction_pcie_blocks
-                self.migration_bytes += eviction_pcie_bytes
+        prefill_latency += batch_callback_time_s
+        self.migration_time_s += batch_callback_time_s
+        self.callback_migration_time_s += batch_callback_time_s
+        self.overlapped_eviction_time_s += batch_eviction_time_s
+        self.dma_time_s += batch_same_die_time_s
+        self.cross_die_time_s += batch_cross_die_time_s
+        self.cross_card_time_s += batch_cross_card_time_s
+        self.pcie_time_s += batch_pcie_time_s
+        self.migration_bytes += batch_migration_bytes
+        self.dma_transfer_blocks += batch_callback_dma_blocks + batch_eviction_dma_blocks
+        self.pcie_transfer_blocks += batch_callback_pcie_blocks + batch_eviction_pcie_blocks
+        self.callback_dma_transfer_blocks += batch_callback_dma_blocks
+        self.callback_pcie_transfer_blocks += batch_callback_pcie_blocks
+        self.eviction_dma_transfer_blocks += batch_eviction_dma_blocks
+        self.eviction_pcie_transfer_blocks += batch_eviction_pcie_blocks
 
         if batch_max_miss_tokens > 0 and self.system is not None:
             estimate = self.system.estimate_prefill_microbatch(
@@ -438,10 +484,14 @@ class StaticBatchScheduler:
             "migration_bytes": self.migration_bytes,
             "dma_transfer_blocks": self.dma_transfer_blocks,
             "pcie_transfer_blocks": self.pcie_transfer_blocks,
+            "cross_die_transfer_blocks": self.cross_die_transfer_blocks,
+            "cross_card_transfer_blocks": self.cross_card_transfer_blocks,
             "callback_dma_transfer_blocks": self.callback_dma_transfer_blocks,
             "callback_pcie_transfer_blocks": self.callback_pcie_transfer_blocks,
             "eviction_dma_transfer_blocks": self.eviction_dma_transfer_blocks,
             "eviction_pcie_transfer_blocks": self.eviction_pcie_transfer_blocks,
+            "cross_die_time_s": self.cross_die_time_s,
+            "cross_card_time_s": self.cross_card_time_s,
         }
         components = ["dram", "l2", "l1", "reg", "alu", "comm"]
         for i, name in enumerate(components):
