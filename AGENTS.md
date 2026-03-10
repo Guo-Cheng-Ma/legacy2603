@@ -57,6 +57,7 @@ timeline.csv                   # Step-by-step change log (append after each comm
 4. **`llm-req-inputs/` files are large** - never `cat` them entirely; use `head` or load programmatically.
 5. **`ramulator.out`** is a cache file that accelerates simulation - do not delete or corrupt it.
 6. **Python frontend only** - modifications go in `src/` and `main.py`.
+7. **Git push requires proxy** - run `source /etc/profile.d/clash.sh && proxy_on` before `git push`, or use SSH remote.
 
 ## Python Environment
 
