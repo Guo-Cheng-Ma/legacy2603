@@ -7,6 +7,8 @@ system:
 pim:
   pim: bank
   die_type: vstack
+  compute_stack_l1: 4
+  capacity_stack_l2: 4
   powerlimit: false
   ffopt: false
   pipeopt: false
@@ -23,9 +25,6 @@ workload:
 
 kv_arch:
   num_cards: 8
-  gpu_mem_per_card_gb: 60
-  hispeed_kv_per_card_gb: 20
-  hicap_total_per_card_gb: 40
   host_kv_total_gb: 512
   dma_bandwidth_gbps: 1676
   pcie_bandwidth_gbps: 64

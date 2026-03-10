@@ -9,8 +9,10 @@ system:
 
 pim:
   pim: bank                    # bank, bg, buffer
-  num_pim_die: 5               # HBM-PIM dies per GPU (0-4 for attacc)
+  num_pim_die: 4               # HBM-PIM die-packages per GPU card (attacc only)
   die_type: attacc             # attacc (dedicated PIM dies), vstack (hybrid all-die)
+  compute_stack_l1: 4          # vstack only: compute stacks per die-package
+  capacity_stack_l2: 4         # vstack only: capacity stacks per die-package
   powerlimit: false
   ffopt: false
   pipeopt: false
@@ -36,9 +38,6 @@ trace:
 
 kv_arch:
   num_cards: 8
-  gpu_mem_per_card_gb: 60
-  hispeed_kv_per_card_gb: 20   # L1 (compute layers)
-  hicap_total_per_card_gb: 40  # L2 (weights + KV)
   host_kv_total_gb: 512        # L3 host spill tier
   dma_bandwidth_gbps: 1676
   pcie_bandwidth_gbps: 64

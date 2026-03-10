@@ -128,7 +128,9 @@ def main():
     dtype = DataType.W16A16 if args.word == 2 else DataType.W8A8
     modelinfos = make_model_config(args.model, dtype)
     xpu_config = make_xpu_config(gpu_device, num_gpu=num_gpu, mem_cap=gmem_cap,
-                                  num_pim_die=num_pim_die, die_type=die_type)
+                                  num_pim_die=num_pim_die, die_type=die_type,
+                                  compute_stack_l1=args.compute_stack_l1,
+                                  capacity_stack_l2=args.capacity_stack_l2)
     system = System(xpu_config['GPU'], modelinfos)
     if args.system in ['dgx-attacc']:
         if args.pim == "bg":
@@ -141,7 +143,9 @@ def main():
                                      InterfaceType.NVLINK3,
                                      num_pim_die=num_pim_die,
                                      power_constraint=args.powerlimit,
-                                     die_type=die_type)
+                                     die_type=die_type,
+                                     compute_stack_l1=args.compute_stack_l1,
+                                     capacity_stack_l2=args.capacity_stack_l2)
         system.set_accelerator(modelinfos, DeviceType.PIM, pim_config)
 
     elif args.system in ['dgx-cpu']:

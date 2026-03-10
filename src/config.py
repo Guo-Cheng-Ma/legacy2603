@@ -5,23 +5,39 @@ import copy
 SCALING_FACTOR = {}
 SCALING_FACTOR['MAX_COMPUTE_UTIL'] = 0.8
 SCALING_FACTOR['MAX_OFF_MEM_BW_UTIL'] = 0.85
-VSTACK_CAPACITY_RATIO = 0.75
+
+HBM_DIE_PACKAGES_PER_CARD = 5
+HBM_STACKS_PER_DIE_PACKAGE = 8
+HBM_BANKS_PER_DIE_PACKAGE = 1024
+FULL_HBM_DIE_CAPACITY_GB = 16.0
+FULL_HBM_STACK_CAPACITY_GB = FULL_HBM_DIE_CAPACITY_GB / HBM_STACKS_PER_DIE_PACKAGE
+PIM_DIE_CAPACITY_RATIO = 0.5
+COMPUTE_STACK_CAPACITY_RATIO = 0.5
 
 # Heterogeneous 3-tier KV cache architecture defaults.
 # Prefer providing these via YAML in trace mode (`--kv-arch-config`).
 DEFAULT_HETERO_KV_ARCH = {
     "NUM_CARDS": 8,
-    "GPU_MEM_PER_CARD_GB": 60,
-    "HISPEED_KV_PER_CARD_GB": 20,  # L1 (compute layers)
-    "HICAP_TOTAL_PER_CARD_GB": 40,  # L2 (weights + KV)
+    "DIE_TYPE": "attacc",
+    "NUM_PIM_DIE": 4,
+    "COMPUTE_STACK_L1": 4,
+    "CAPACITY_STACK_L2": 4,
     "HOST_KV_TOTAL_GB": 512,  # L3 host spill tier
     "DMA_BW_BPS": 1676 * 1000 * 1000 * 1000,  # default: 0.5 * A100 HBM3 BW
     "PCIE_BW_BPS": 64 * 1000 * 1000 * 1000,  # PCIe 4.0 x16
+    "NUM_DIE_PACKAGES_PER_CARD": HBM_DIE_PACKAGES_PER_CARD,
+    "STACKS_PER_DIE_PACKAGE": HBM_STACKS_PER_DIE_PACKAGE,
+    "BANKS_PER_DIE_PACKAGE": HBM_BANKS_PER_DIE_PACKAGE,
+    "FULL_DIE_CAPACITY_GB": FULL_HBM_DIE_CAPACITY_GB,
 }
 
 
 def gib_to_bytes(gib: float) -> int:
     return int(float(gib) * 1024 * 1024 * 1024)
+
+
+def bytes_to_gib(byte_count: int) -> float:
+    return float(byte_count) / (1024.0 * 1024.0 * 1024.0)
 
 
 def _required_numeric(cfg, key):
@@ -97,8 +113,10 @@ _UNIFIED_DEFAULTS = {
     'gmemcap': None,
     # pim
     'pim': 'bank',
-    'num_pim_die': 5,
+    'num_pim_die': 4,
     'die_type': 'attacc',
+    'compute_stack_l1': 4,
+    'capacity_stack_l2': 4,
     'powerlimit': False,
     'ffopt': False,
     'pipeopt': False,
@@ -144,15 +162,21 @@ def load_unified_config(yaml_path: str) -> argparse.Namespace:
                 if key in cfg:
                     cfg[key] = value
 
-    # kv_arch section: pass inline dict so load_hetero_kv_arch_config can consume it
+    # kv_arch section: keep bandwidth/host overrides here and derive capacity inputs from unified config.
     kv_section = parsed.get('kv_arch', None)
-    if isinstance(kv_section, dict) and kv_section:
-        cfg['kv_arch_config'] = kv_section
-    # else: remains None -> will use DEFAULT_HETERO_KV_ARCH
+    kv_cfg = dict(kv_section) if isinstance(kv_section, dict) else {}
+    kv_cfg.setdefault('num_cards', cfg['ngpu'])
+    kv_cfg.setdefault('die_type', cfg['die_type'])
+    kv_cfg.setdefault('num_pim_die', cfg['num_pim_die'])
+    kv_cfg.setdefault('compute_stack_l1', cfg['compute_stack_l1'])
+    kv_cfg.setdefault('capacity_stack_l2', cfg['capacity_stack_l2'])
+    cfg['kv_arch_config'] = kv_cfg
 
     # Type coercions
     cfg['ngpu'] = int(cfg['ngpu'])
     cfg['num_pim_die'] = int(cfg['num_pim_die'])
+    cfg['compute_stack_l1'] = int(cfg['compute_stack_l1'])
+    cfg['capacity_stack_l2'] = int(cfg['capacity_stack_l2'])
     cfg['word'] = int(cfg['word'])
     cfg['lin'] = int(cfg['lin'])
     cfg['lout'] = int(cfg['lout'])
@@ -197,25 +221,101 @@ def load_hetero_kv_arch_config(yaml_path=None) -> dict:
 
     normalized = {
         "NUM_CARDS": root.get("num_cards", cfg["NUM_CARDS"]),
-        "GPU_MEM_PER_CARD_GB": root.get("gpu_mem_per_card_gb", cfg["GPU_MEM_PER_CARD_GB"]),
-        "HISPEED_KV_PER_CARD_GB": root.get("hispeed_kv_per_card_gb", cfg["HISPEED_KV_PER_CARD_GB"]),
-        "HICAP_TOTAL_PER_CARD_GB": root.get("hicap_total_per_card_gb", cfg["HICAP_TOTAL_PER_CARD_GB"]),
+        "DIE_TYPE": str(root.get("die_type", cfg["DIE_TYPE"])).lower(),
+        "NUM_PIM_DIE": root.get("num_pim_die", cfg["NUM_PIM_DIE"]),
+        "COMPUTE_STACK_L1": root.get("compute_stack_l1", cfg["COMPUTE_STACK_L1"]),
+        "CAPACITY_STACK_L2": root.get("capacity_stack_l2", cfg["CAPACITY_STACK_L2"]),
         "HOST_KV_TOTAL_GB": root.get("host_kv_total_gb", cfg["HOST_KV_TOTAL_GB"]),
         "DMA_BW_BPS": root.get("dma_bandwidth_gbps", cfg["DMA_BW_BPS"] / 1e9) * 1e9,
         "PCIE_BW_BPS": root.get("pcie_bandwidth_gbps", cfg["PCIE_BW_BPS"] / 1e9) * 1e9,
+        "NUM_DIE_PACKAGES_PER_CARD": root.get("num_die_packages_per_card", cfg["NUM_DIE_PACKAGES_PER_CARD"]),
+        "STACKS_PER_DIE_PACKAGE": root.get("stacks_per_die_package", cfg["STACKS_PER_DIE_PACKAGE"]),
+        "BANKS_PER_DIE_PACKAGE": root.get("banks_per_die_package", cfg["BANKS_PER_DIE_PACKAGE"]),
+        "FULL_DIE_CAPACITY_GB": root.get("full_die_capacity_gb", cfg["FULL_DIE_CAPACITY_GB"]),
     }
 
-    # Validate required numeric values.
     validated = {
         "NUM_CARDS": int(_required_numeric(normalized, "NUM_CARDS")),
-        "GPU_MEM_PER_CARD_GB": _required_numeric(normalized, "GPU_MEM_PER_CARD_GB"),
-        "HISPEED_KV_PER_CARD_GB": _required_numeric(normalized, "HISPEED_KV_PER_CARD_GB"),
-        "HICAP_TOTAL_PER_CARD_GB": _required_numeric(normalized, "HICAP_TOTAL_PER_CARD_GB"),
+        "DIE_TYPE": normalized["DIE_TYPE"],
+        "NUM_PIM_DIE": int(normalized["NUM_PIM_DIE"]),
+        "COMPUTE_STACK_L1": int(normalized["COMPUTE_STACK_L1"]),
+        "CAPACITY_STACK_L2": int(normalized["CAPACITY_STACK_L2"]),
         "HOST_KV_TOTAL_GB": _required_numeric(normalized, "HOST_KV_TOTAL_GB"),
         "DMA_BW_BPS": _required_numeric(normalized, "DMA_BW_BPS"),
         "PCIE_BW_BPS": _required_numeric(normalized, "PCIE_BW_BPS"),
+        "NUM_DIE_PACKAGES_PER_CARD": int(_required_numeric(normalized, "NUM_DIE_PACKAGES_PER_CARD")),
+        "STACKS_PER_DIE_PACKAGE": int(_required_numeric(normalized, "STACKS_PER_DIE_PACKAGE")),
+        "BANKS_PER_DIE_PACKAGE": int(_required_numeric(normalized, "BANKS_PER_DIE_PACKAGE")),
+        "FULL_DIE_CAPACITY_GB": _required_numeric(normalized, "FULL_DIE_CAPACITY_GB"),
     }
+    if validated["DIE_TYPE"] not in {"attacc", "vstack"}:
+        raise ValueError(f"unsupported die_type: {validated['DIE_TYPE']}")
+    if validated["DIE_TYPE"] == "attacc":
+        max_pim_die = validated["NUM_DIE_PACKAGES_PER_CARD"] - 1
+        if validated["NUM_PIM_DIE"] < 0 or validated["NUM_PIM_DIE"] > max_pim_die:
+            raise ValueError(f"num_pim_die must be in [0, {max_pim_die}] for attacc")
+    else:
+        total_stacks = validated["STACKS_PER_DIE_PACKAGE"]
+        if validated["COMPUTE_STACK_L1"] + validated["CAPACITY_STACK_L2"] != total_stacks:
+            raise ValueError(
+                "compute_stack_l1 + capacity_stack_l2 must equal "
+                f"{total_stacks} for vstack"
+            )
     return validated
+
+
+def get_hetero_memory_topology(hetero_kv_arch: dict = None) -> dict:
+    cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
+
+    num_cards = int(cfg["NUM_CARDS"])
+    die_type = str(cfg["DIE_TYPE"]).lower()
+    num_die_packages = int(cfg["NUM_DIE_PACKAGES_PER_CARD"])
+    stacks_per_die = int(cfg["STACKS_PER_DIE_PACKAGE"])
+    banks_per_die = int(cfg["BANKS_PER_DIE_PACKAGE"])
+    full_die_capacity_bytes = gib_to_bytes(cfg["FULL_DIE_CAPACITY_GB"])
+    full_stack_capacity_bytes = int(full_die_capacity_bytes / max(stacks_per_die, 1))
+
+    if die_type == "vstack":
+        compute_stack_l1 = int(cfg["COMPUTE_STACK_L1"])
+        capacity_stack_l2 = int(cfg["CAPACITY_STACK_L2"])
+        l1_die_capacity_bytes = int(compute_stack_l1 * full_stack_capacity_bytes * COMPUTE_STACK_CAPACITY_RATIO)
+        l2_die_capacity_bytes = int(capacity_stack_l2 * full_stack_capacity_bytes)
+        l1_die_ids = tuple(range(num_die_packages))
+        l2_die_ids = tuple(range(num_die_packages))
+    else:
+        num_pim_die = int(cfg["NUM_PIM_DIE"])
+        l1_die_capacity_bytes = int(full_die_capacity_bytes * PIM_DIE_CAPACITY_RATIO) if num_pim_die > 0 else 0
+        l2_die_capacity_bytes = full_die_capacity_bytes if num_pim_die < num_die_packages else 0
+        l1_die_ids = tuple(range(num_pim_die))
+        l2_die_ids = tuple(range(num_pim_die, num_die_packages))
+
+    l1_per_card_bytes = l1_die_capacity_bytes * len(l1_die_ids)
+    l2_per_card_bytes = l2_die_capacity_bytes * len(l2_die_ids)
+    gpu_mem_per_card_bytes = l1_per_card_bytes + l2_per_card_bytes
+    l1_bank_capacity_bytes = int(l1_die_capacity_bytes / banks_per_die) if l1_die_capacity_bytes > 0 else 0
+
+    return {
+        "num_cards": num_cards,
+        "die_type": die_type,
+        "num_die_packages_per_card": num_die_packages,
+        "stacks_per_die_package": stacks_per_die,
+        "banks_per_die": banks_per_die,
+        "full_die_capacity_bytes": full_die_capacity_bytes,
+        "full_stack_capacity_bytes": full_stack_capacity_bytes,
+        "l1_die_ids": l1_die_ids,
+        "l2_die_ids": l2_die_ids,
+        "l1_die_capacity_bytes": l1_die_capacity_bytes,
+        "l2_die_capacity_bytes": l2_die_capacity_bytes,
+        "l1_bank_capacity_bytes": l1_bank_capacity_bytes,
+        "l1_per_card_bytes": l1_per_card_bytes,
+        "l2_per_card_bytes": l2_per_card_bytes,
+        "gpu_mem_per_card_bytes": gpu_mem_per_card_bytes,
+        "l1_per_card_gb": bytes_to_gib(l1_per_card_bytes),
+        "l2_per_card_gb": bytes_to_gib(l2_per_card_bytes),
+        "gpu_mem_per_card_gb": bytes_to_gib(gpu_mem_per_card_bytes),
+        "num_l1_dies_total": num_cards * len(l1_die_ids),
+        "num_l2_dies_total": num_cards * len(l2_die_ids),
+    }
 
 
 def get_hetero_transfer_bandwidths(hetero_kv_arch: dict = None) -> dict:
@@ -229,23 +329,35 @@ def get_hetero_transfer_bandwidths(hetero_kv_arch: dict = None) -> dict:
 def get_hetero_kv_capacities(weight_bytes_total: int = 0, hetero_kv_arch: dict = None) -> dict:
     """Return architecture-derived global KV capacities for L1/L2/L3 tiers."""
     cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
-    num_cards = int(cfg["NUM_CARDS"])
-    l1_total = gib_to_bytes(
-        cfg["HISPEED_KV_PER_CARD_GB"] * num_cards
-    )
-    l2_total = gib_to_bytes(
-        cfg["HICAP_TOTAL_PER_CARD_GB"] * num_cards
-    )
+    topo = get_hetero_memory_topology(cfg)
+    l1_total = topo["l1_per_card_bytes"] * topo["num_cards"]
+    l2_total = topo["l2_per_card_bytes"] * topo["num_cards"]
     l3_total = gib_to_bytes(cfg["HOST_KV_TOTAL_GB"])
 
     weight_bytes = max(0, int(weight_bytes_total))
     l2_kv = max(0, l2_total - weight_bytes)
+    l2_kv_die_capacity_bytes = 0
+    if topo["num_l2_dies_total"] > 0:
+        l2_kv_die_capacity_bytes = int(l2_kv / topo["num_l2_dies_total"])
     return {
         "l1_kv_bytes": l1_total,
         "l2_total_bytes": l2_total,
         "l2_kv_bytes": l2_kv,
         "l3_kv_bytes": l3_total,
         "weight_bytes_total": weight_bytes,
+        "gpu_mem_per_card_bytes": topo["gpu_mem_per_card_bytes"],
+        "gpu_mem_per_card_gb": topo["gpu_mem_per_card_gb"],
+        "hispeed_kv_per_card_gb": topo["l1_per_card_gb"],
+        "hicap_total_per_card_gb": topo["l2_per_card_gb"],
+        "num_die_packages_per_card": topo["num_die_packages_per_card"],
+        "banks_per_die": topo["banks_per_die"],
+        "l1_die_capacity_bytes": topo["l1_die_capacity_bytes"],
+        "l2_die_capacity_bytes": topo["l2_die_capacity_bytes"],
+        "l1_bank_capacity_bytes": topo["l1_bank_capacity_bytes"],
+        "l2_kv_die_capacity_bytes": l2_kv_die_capacity_bytes,
+        "l1_die_ids": topo["l1_die_ids"],
+        "l2_die_ids": topo["l2_die_ids"],
+        "die_type": topo["die_type"],
     }
 
 # ENERGY_TABLE: pJ per byte
@@ -320,18 +432,29 @@ def make_xpu_config(gpu_type: GPUType,
                     mem_bw=None,
                     power_constraint=True,
                     num_pim_die=0,
-                    die_type='attacc'):
-    TOTAL_HBM_DIES = 5
+                    die_type='attacc',
+                    compute_stack_l1=4,
+                    capacity_stack_l2=4):
+    topo = get_hetero_memory_topology({
+        "NUM_CARDS": 1,
+        "DIE_TYPE": die_type,
+        "NUM_PIM_DIE": num_pim_die,
+        "COMPUTE_STACK_L1": compute_stack_l1,
+        "CAPACITY_STACK_L2": capacity_stack_l2,
+        "NUM_DIE_PACKAGES_PER_CARD": HBM_DIE_PACKAGES_PER_CARD,
+        "STACKS_PER_DIE_PACKAGE": HBM_STACKS_PER_DIE_PACKAGE,
+        "BANKS_PER_DIE_PACKAGE": HBM_BANKS_PER_DIE_PACKAGE,
+        "FULL_DIE_CAPACITY_GB": FULL_HBM_DIE_CAPACITY_GB,
+    })
+    total_hbm_dies = topo["num_die_packages_per_card"]
     if die_type == 'vstack':
-        # All 5 dies are hybrid: GPU reads all channels at full BW,
-        # each die has reduced capacity due to PIM logic area.
-        raw_hbm_dies = TOTAL_HBM_DIES
+        raw_hbm_dies = total_hbm_dies
         raw_hbm_ratio = 1.0
-        capacity_per_die_bytes = int(16 * 1024 * 1024 * 1024 * VSTACK_CAPACITY_RATIO)
+        capacity_per_device_bytes = topo["gpu_mem_per_card_bytes"]
     else:  # attacc
-        raw_hbm_dies = TOTAL_HBM_DIES - num_pim_die
-        raw_hbm_ratio = raw_hbm_dies / TOTAL_HBM_DIES
-        capacity_per_die_bytes = 16 * 1024 * 1024 * 1024
+        raw_hbm_dies = total_hbm_dies - num_pim_die
+        raw_hbm_ratio = raw_hbm_dies / total_hbm_dies
+        capacity_per_device_bytes = topo["l2_per_card_bytes"]
 
     config = {'GPU': {}, 'CPU': {}}
     config['GPU']["GPUTYPE"] = gpu_type
@@ -342,8 +465,7 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 108
         config['GPU']["FLOPS_PER_DEVICE"] = 312 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_die_bytes * raw_hbm_dies \
-                                                    if mem_cap is None else mem_cap
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_device_bytes if mem_cap is None else mem_cap
 
         config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
                                                   if mem_bw is None else mem_bw
@@ -371,8 +493,7 @@ def make_xpu_config(gpu_type: GPUType,
         config['GPU']["NUM_CORE"] = 132
         config['GPU']["FLOPS_PER_DEVICE"] = 989.4 * 1000 * 1000 * 1000 * 1000 \
                                             if flops is None else flops
-        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_die_bytes * raw_hbm_dies \
-                                                   if mem_cap is None else mem_cap
+        config['GPU']["MEM_CAPACITY_PER_DEVICE"] = capacity_per_device_bytes if mem_cap is None else mem_cap
         config['GPU']["OFF_MEM_BW_PER_DEVICE"] = int(3352 * 1000 * 1000 * 1000 * raw_hbm_ratio) \
                                                  if mem_bw is None else mem_bw
         config['GPU']["L2_MEM_BW_PER_DEVICE"] = float('inf')
@@ -429,7 +550,9 @@ def make_pim_config(pim_type: PIMType,
                     num_pim_die=5,
                     bw_scale=None,
                     power_constraint=False,
-                    die_type='attacc'):
+                    die_type='attacc',
+                    compute_stack_l1=4,
+                    capacity_stack_l2=4):
     config = {}
     config["PIM_TYPE"] = pim_type
     config["POWER_CONSTRAINT"] = power_constraint
@@ -439,10 +562,19 @@ def make_pim_config(pim_type: PIMType,
                                 if bw_scale is None else bw_scale
     config["NUM_ATTACC"] = num_attacc
     config["NUM_PIM_DIE"] = num_pim_die
-    if die_type == 'vstack':
-        config["MEM_CAPACITY_PER_PIM_DIE"] = int(16 * 1024 * 1024 * 1024 * VSTACK_CAPACITY_RATIO)
-    else:
-        config["MEM_CAPACITY_PER_PIM_DIE"] = 16 * 1024 * 1024 * 1024
+    topo = get_hetero_memory_topology({
+        "NUM_CARDS": num_attacc,
+        "DIE_TYPE": die_type,
+        "NUM_PIM_DIE": num_pim_die,
+        "COMPUTE_STACK_L1": compute_stack_l1,
+        "CAPACITY_STACK_L2": capacity_stack_l2,
+        "NUM_DIE_PACKAGES_PER_CARD": HBM_DIE_PACKAGES_PER_CARD,
+        "STACKS_PER_DIE_PACKAGE": HBM_STACKS_PER_DIE_PACKAGE,
+        "BANKS_PER_DIE_PACKAGE": HBM_BANKS_PER_DIE_PACKAGE,
+        "FULL_DIE_CAPACITY_GB": FULL_HBM_DIE_CAPACITY_GB,
+    })
+    # In vstack, capacity is already accounted for on the GPU side.
+    config["MEM_CAPACITY_PER_PIM_DIE"] = 0 if die_type == 'vstack' else topo["l1_die_capacity_bytes"]
     config[
         "MEM_BW_PER_PIM_DIE"] = 670.4 * 1000 * 1000 * 1000 * internal_bandwidth_scale
     config["FLOPS_PER_PIM_DIE"] = config["MEM_BW_PER_PIM_DIE"] * opb
