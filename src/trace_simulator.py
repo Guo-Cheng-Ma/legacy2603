@@ -1,4 +1,4 @@
-import csv
+import json
 import math
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -414,7 +414,39 @@ def run_trace_simulation(
     }
 
 
-def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path='trace_requests.csv'):
+def _ordered_record(row: Dict, columns: List[str]) -> Dict:
+    return {key: row.get(key, None) for key in columns}
+
+
+def _write_yaml_record(path: str, row: Dict, columns: List[str]) -> None:
+    ordered_row = _ordered_record(row, columns)
+    try:
+        import yaml
+        yaml_text = yaml.safe_dump(
+            ordered_row,
+            sort_keys=False,
+            default_flow_style=False,
+            width=4096,
+        )
+    except ImportError:
+        yaml_lines = [
+            "{}: {}".format(key, json.dumps(value, ensure_ascii=False))
+            for key, value in ordered_row.items()
+        ]
+        yaml_text = "\n".join(yaml_lines) + "\n"
+
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write(yaml_text)
+
+
+def _write_jsonl_rows(path: str, rows: List[Dict], columns: List[str]) -> None:
+    with open(path, 'w', encoding='utf-8') as handle:
+        for row in rows:
+            handle.write(json.dumps(_ordered_record(row, columns), ensure_ascii=False))
+            handle.write("\n")
+
+
+def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path='trace_requests.jsonl'):
     summary = result['summary']
     request_rows = result['requests']
 
@@ -588,10 +620,7 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'g_alu_energy',
         'g_comm_energy',
     ]
-    with open(summary_path, 'w', newline='', encoding='utf-8') as handle:
-        writer = csv.DictWriter(handle, fieldnames=summary_cols)
-        writer.writeheader()
-        writer.writerow({k: summary.get(k, None) for k in summary_cols})
+    _write_yaml_record(summary_path, summary, summary_cols)
 
     request_cols = [
         'req_id',
@@ -637,11 +666,7 @@ def write_trace_outputs(result, summary_path='trace_summary.csv', requests_path=
         'callback_cross_die_blocks',
         'callback_cross_card_blocks',
     ]
-    with open(requests_path, 'w', newline='', encoding='utf-8') as handle:
-        writer = csv.DictWriter(handle, fieldnames=request_cols)
-        writer.writeheader()
-        for row in request_rows:
-            writer.writerow({k: row.get(k, None) for k in request_cols})
+    _write_jsonl_rows(requests_path, request_rows, request_cols)
 
 
 def run_trace_mode(system, args):

@@ -66,13 +66,37 @@ def run(system: System,
         write_csv(output_file, perfs)
 
 
-def _trace_output_paths(trace_file: str, dtype_tag: str):
-    timestamp = datetime.now().strftime("%m%d_%H%M%S")
-    input_request_name = Path(trace_file).stem
-    dtype_tag = str(dtype_tag).upper()
-    summary_name = f"trace_summary_{dtype_tag}_{timestamp}_{input_request_name}.csv"
-    requests_name = f"trace_requests_{dtype_tag}_{timestamp}_{input_request_name}.csv"
-    return summary_name, requests_name
+def _trace_name(trace_file: str) -> str:
+    trace_stem = Path(trace_file).stem
+    trace_stem_lower = trace_stem.lower()
+    trace_aliases = {
+        'tracea': 'traceA',
+        'traceb': 'traceB',
+        'coder': 'coder',
+        'thinking': 'thinking',
+    }
+    for needle, alias in trace_aliases.items():
+        if needle in trace_stem_lower:
+            return alias
+    return trace_stem
+
+
+def _trace_output_paths(trace_file: str, die_type: str, compute_stack_l1: int,
+                        model: str, ngpu: int):
+    now = datetime.now()
+    date_tag = now.strftime("%y%m%d")
+    time_tag = now.strftime("%H%M%S")
+    trace_dir = Path("results") / date_tag / _trace_name(trace_file)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    die_tag = str(die_type).lower()
+    compute_tag = str(int(compute_stack_l1))
+    model_tag = str(model)
+    ngpu_tag = f"{int(ngpu)}gpu"
+
+    summary_path = trace_dir / f"S-{die_tag}-{compute_tag}-{model_tag}-{ngpu_tag}-{time_tag}.yaml"
+    requests_path = trace_dir / f"R-{die_tag}-{compute_tag}-{model_tag}-{ngpu_tag}-{time_tag}.jsonl"
+    return str(summary_path), str(requests_path)
 
 
 def main():
@@ -154,12 +178,6 @@ def main():
         system.set_accelerator(modelinfos, DeviceType.CPU, xpu_config['CPU'])
 
     if args.mode == 'trace':
-        if args.pim == "bg":
-            dtype_tag = "BG"
-        elif args.pim == "buffer":
-            dtype_tag = "BUFFER"
-        else:
-            dtype_tag = "BA"
         result = run_trace_simulation(
             system=system,
             trace_file=args.trace_file,
@@ -178,7 +196,13 @@ def main():
             trace_scheduler=args.trace_scheduler,
         )
         summary = result['summary']
-        summary_path, requests_path = _trace_output_paths(args.trace_file, dtype_tag)
+        summary_path, requests_path = _trace_output_paths(
+            trace_file=args.trace_file,
+            die_type=args.die_type,
+            compute_stack_l1=args.compute_stack_l1,
+            model=args.model,
+            ngpu=args.ngpu,
+        )
         write_trace_outputs(result, summary_path=summary_path, requests_path=requests_path)
         print(
             "Trace mode done: requests={} total_time={:.6f}s kv_hits={} kv_misses={} outputs=[{},{}]".format(
