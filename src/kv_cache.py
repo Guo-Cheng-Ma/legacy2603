@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -16,6 +16,99 @@ class KVLocation:
     card: Optional[int] = None
     die: Optional[int] = None
     bank: Optional[int] = None
+
+
+@dataclass
+class KVTransferDomainDemands:
+    dma: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    hbm_read: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    hbm_write: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    nvlink: Dict[Tuple[int, int], float] = field(default_factory=dict)
+    pcie: Dict[int, float] = field(default_factory=dict)
+
+    @staticmethod
+    def _merge_time(mapping: Dict, key, time_s: float) -> None:
+        time_s = float(time_s)
+        if time_s <= 0.0 or key is None:
+            return
+        mapping[key] = mapping.get(key, 0.0) + time_s
+
+    def add_dma(self, card: Optional[int], die: Optional[int], time_s: float) -> None:
+        if card is None or die is None:
+            return
+        self._merge_time(self.dma, (int(card), int(die)), time_s)
+
+    def add_hbm_read(self, card: Optional[int], die: Optional[int], time_s: float) -> None:
+        if card is None or die is None:
+            return
+        self._merge_time(self.hbm_read, (int(card), int(die)), time_s)
+
+    def add_hbm_write(self, card: Optional[int], die: Optional[int], time_s: float) -> None:
+        if card is None or die is None:
+            return
+        self._merge_time(self.hbm_write, (int(card), int(die)), time_s)
+
+    def add_nvlink(self, src_card: Optional[int], dst_card: Optional[int], time_s: float) -> None:
+        if src_card is None or dst_card is None:
+            return
+        self._merge_time(self.nvlink, (int(src_card), int(dst_card)), time_s)
+
+    def add_pcie(self, card: Optional[int], time_s: float) -> None:
+        if card is None:
+            return
+        self._merge_time(self.pcie, int(card), time_s)
+
+    def merge(self, other: "KVTransferDomainDemands") -> None:
+        for key, value in other.dma.items():
+            self._merge_time(self.dma, key, value)
+        for key, value in other.hbm_read.items():
+            self._merge_time(self.hbm_read, key, value)
+        for key, value in other.hbm_write.items():
+            self._merge_time(self.hbm_write, key, value)
+        for key, value in other.nvlink.items():
+            self._merge_time(self.nvlink, key, value)
+        for key, value in other.pcie.items():
+            self._merge_time(self.pcie, key, value)
+
+
+@dataclass(frozen=True)
+class KVTransferOverlap:
+    dma_overlapped_time_s: float = 0.0
+    hbm_read_overlapped_time_s: float = 0.0
+    hbm_write_overlapped_time_s: float = 0.0
+    hbm_overlapped_time_s: float = 0.0
+    nvlink_overlapped_time_s: float = 0.0
+    pcie_overlapped_time_s: float = 0.0
+    blocking_time_s: float = 0.0
+    active_dma_domains: int = 0
+    active_hbm_read_domains: int = 0
+    active_hbm_write_domains: int = 0
+    active_nvlink_domains: int = 0
+    active_pcie_domains: int = 0
+
+
+def reduce_transfer_demands(demands: KVTransferDomainDemands) -> KVTransferOverlap:
+    dma_overlapped = max(demands.dma.values()) if demands.dma else 0.0
+    hbm_read_overlapped = max(demands.hbm_read.values()) if demands.hbm_read else 0.0
+    hbm_write_overlapped = max(demands.hbm_write.values()) if demands.hbm_write else 0.0
+    nvlink_overlapped = max(demands.nvlink.values()) if demands.nvlink else 0.0
+    pcie_overlapped = max(demands.pcie.values()) if demands.pcie else 0.0
+    hbm_overlapped = hbm_read_overlapped + hbm_write_overlapped
+    blocking_time_s = max(dma_overlapped, pcie_overlapped, hbm_overlapped + nvlink_overlapped)
+    return KVTransferOverlap(
+        dma_overlapped_time_s=dma_overlapped,
+        hbm_read_overlapped_time_s=hbm_read_overlapped,
+        hbm_write_overlapped_time_s=hbm_write_overlapped,
+        hbm_overlapped_time_s=hbm_overlapped,
+        nvlink_overlapped_time_s=nvlink_overlapped,
+        pcie_overlapped_time_s=pcie_overlapped,
+        blocking_time_s=blocking_time_s,
+        active_dma_domains=len(demands.dma),
+        active_hbm_read_domains=len(demands.hbm_read),
+        active_hbm_write_domains=len(demands.hbm_write),
+        active_nvlink_domains=len(demands.nvlink),
+        active_pcie_domains=len(demands.pcie),
+    )
 
 
 @dataclass
@@ -68,6 +161,8 @@ class KVAccessResult:
     cross_die_time_s: float = 0.0
     cross_card_time_s: float = 0.0
     pcie_time_s: float = 0.0
+    callback_demands: KVTransferDomainDemands = field(default_factory=KVTransferDomainDemands)
+    eviction_demands: KVTransferDomainDemands = field(default_factory=KVTransferDomainDemands)
 
     @property
     def l1_hit(self) -> int:
@@ -243,6 +338,31 @@ class KVCacheManager:
             result.callback_time_s += time_s
         else:
             result.eviction_time_s += time_s
+        self._record_transfer_domains(result, src, dst, is_callback=is_callback)
+
+    def _record_transfer_domains(self, result: KVAccessResult, src: KVLocation, dst: KVLocation, is_callback: bool) -> None:
+        bytes_size = self.kv_bytes_per_block
+        per_die_bw = (self.card_total_bw_bps / self.num_die_packages_per_card) if self.num_die_packages_per_card > 0 else 0.0
+        pcie_time_s = (bytes_size / self.pcie_bw_bps) if self.pcie_bw_bps > 0 else 0.0
+        hbm_stage_time_s = (bytes_size / per_die_bw) if per_die_bw > 0 else 0.0
+        dma_time_s = (2.0 * bytes_size / self.dma_bw_bps) if self.dma_bw_bps > 0 else 0.0
+        nvlink_time_s = (bytes_size / self.nvlink_bw_bps) if self.nvlink_bw_bps > 0 else 0.0
+        demands = result.callback_demands if is_callback else result.eviction_demands
+
+        if src.tier == KVTier.L3 or dst.tier == KVTier.L3:
+            card = dst.card if src.tier == KVTier.L3 else src.card
+            demands.add_pcie(card, pcie_time_s)
+            return
+        if src.card == dst.card:
+            if src.die == dst.die:
+                demands.add_dma(src.card, src.die, dma_time_s)
+                return
+            demands.add_hbm_read(src.card, src.die, hbm_stage_time_s)
+            demands.add_hbm_write(dst.card, dst.die, hbm_stage_time_s)
+            return
+        demands.add_hbm_read(src.card, src.die, hbm_stage_time_s)
+        demands.add_nvlink(src.card, dst.card, nvlink_time_s)
+        demands.add_hbm_write(dst.card, dst.die, hbm_stage_time_s)
 
     def _record_move(self, src: KVLocation, dst: KVLocation, result: KVAccessResult, is_callback: bool = False) -> None:
         self._record_transfer(result, src, dst, is_callback=is_callback)

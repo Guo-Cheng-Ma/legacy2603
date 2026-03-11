@@ -3,7 +3,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional
 
-from .kv_cache import KVCacheManager
+from .kv_cache import KVCacheManager, KVTransferDomainDemands, reduce_transfer_demands
 from .config import get_hetero_transfer_bandwidths
 from .request_state import RequestLifecycle, RequestState
 
@@ -82,6 +82,28 @@ class ContinuousScheduler:
         self.total_eviction_time_s = 0.0
         self.charged_eviction_time_s = 0.0
         self.overlapped_eviction_time_s = 0.0
+        self.callback_dma_overlapped_time_s = 0.0
+        self.callback_hbm_read_overlapped_time_s = 0.0
+        self.callback_hbm_write_overlapped_time_s = 0.0
+        self.callback_hbm_overlapped_time_s = 0.0
+        self.callback_nvlink_overlapped_time_s = 0.0
+        self.callback_pcie_overlapped_time_s = 0.0
+        self.eviction_dma_overlapped_time_s = 0.0
+        self.eviction_hbm_read_overlapped_time_s = 0.0
+        self.eviction_hbm_write_overlapped_time_s = 0.0
+        self.eviction_hbm_overlapped_time_s = 0.0
+        self.eviction_nvlink_overlapped_time_s = 0.0
+        self.eviction_pcie_overlapped_time_s = 0.0
+        self.max_callback_dma_active_domains = 0
+        self.max_callback_hbm_read_active_domains = 0
+        self.max_callback_hbm_write_active_domains = 0
+        self.max_callback_nvlink_active_domains = 0
+        self.max_callback_pcie_active_domains = 0
+        self.max_eviction_dma_active_domains = 0
+        self.max_eviction_hbm_read_active_domains = 0
+        self.max_eviction_hbm_write_active_domains = 0
+        self.max_eviction_nvlink_active_domains = 0
+        self.max_eviction_pcie_active_domains = 0
         self.cross_die_time_s = 0.0
         self.cross_card_time_s = 0.0
         self.cross_die_transfer_blocks = 0
@@ -95,6 +117,33 @@ class ContinuousScheduler:
     def _log(self, message: str) -> None:
         if self.debug:
             print(f"[TRACE][scheduler][step={self.step_count}][t={self.sim_time:.6f}] {message}")
+
+    def _accumulate_overlap_metrics(self, prefix: str, overlap) -> None:
+        for field_name in [
+            "dma_overlapped_time_s",
+            "hbm_read_overlapped_time_s",
+            "hbm_write_overlapped_time_s",
+            "hbm_overlapped_time_s",
+            "nvlink_overlapped_time_s",
+            "pcie_overlapped_time_s",
+        ]:
+            metric_name = f"{prefix}_{field_name}"
+            setattr(self, metric_name, getattr(self, metric_name) + getattr(overlap, field_name))
+        for field_name in [
+            "active_dma_domains",
+            "active_hbm_read_domains",
+            "active_hbm_write_domains",
+            "active_nvlink_domains",
+            "active_pcie_domains",
+        ]:
+            metric_name = {
+                "active_dma_domains": f"max_{prefix}_dma_active_domains",
+                "active_hbm_read_domains": f"max_{prefix}_hbm_read_active_domains",
+                "active_hbm_write_domains": f"max_{prefix}_hbm_write_active_domains",
+                "active_nvlink_domains": f"max_{prefix}_nvlink_active_domains",
+                "active_pcie_domains": f"max_{prefix}_pcie_active_domains",
+            }[field_name]
+            setattr(self, metric_name, max(getattr(self, metric_name), getattr(overlap, field_name)))
 
     def _admit_arrivals(self) -> int:
         admitted = 0
@@ -168,6 +217,8 @@ class ContinuousScheduler:
             callback_cross_die_blocks = 0
             callback_cross_card_blocks = 0
             callback_from_l3_blocks = 0
+            callback_demands = KVTransferDomainDemands()
+            eviction_demands = KVTransferDomainDemands()
             callback_time_s = 0.0
             eviction_time_s = 0.0
             same_die_time_s = 0.0
@@ -263,6 +314,8 @@ class ContinuousScheduler:
                 callback_cross_die_blocks += access.callback_cross_die
                 callback_cross_card_blocks += access.callback_cross_card
                 callback_from_l3_blocks += access.callback_from_l3
+                callback_demands.merge(access.callback_demands)
+                eviction_demands.merge(access.eviction_demands)
                 callback_time_s += access.callback_time_s
                 eviction_time_s += access.eviction_time_s
                 same_die_time_s += access.same_die_time_s
@@ -281,15 +334,19 @@ class ContinuousScheduler:
             chunk_end = min(req.input_length, req.prefill_progress_tokens + self.prefill_chunk_tokens)
             req.prefill_progress_tokens = chunk_end
 
-            prefill_latency += callback_time_s
-            self.migration_time_s += callback_time_s
-            self.callback_migration_time_s += callback_time_s
+            callback_overlap = reduce_transfer_demands(callback_demands)
+            eviction_overlap = reduce_transfer_demands(eviction_demands)
+            prefill_latency += callback_overlap.blocking_time_s
+            self.migration_time_s += callback_overlap.blocking_time_s
+            self.callback_migration_time_s += callback_overlap.blocking_time_s
+            self._accumulate_overlap_metrics("callback", callback_overlap)
             self.total_eviction_time_s += eviction_time_s
+            self._accumulate_overlap_metrics("eviction", eviction_overlap)
             if self.charge_eviction_latency:
-                prefill_latency += eviction_time_s
-                self.charged_eviction_time_s += eviction_time_s
+                prefill_latency += eviction_overlap.blocking_time_s
+                self.charged_eviction_time_s += eviction_overlap.blocking_time_s
             else:
-                self.overlapped_eviction_time_s += eviction_time_s
+                self.overlapped_eviction_time_s += eviction_overlap.blocking_time_s
             self.dma_time_s += same_die_time_s
             self.cross_die_time_s += cross_die_time_s
             self.cross_card_time_s += cross_card_time_s
@@ -491,6 +548,28 @@ class ContinuousScheduler:
             "total_eviction_time_s": self.total_eviction_time_s,
             "charged_eviction_time_s": self.charged_eviction_time_s,
             "overlapped_eviction_time_s": self.overlapped_eviction_time_s,
+            "callback_dma_overlapped_time_s": self.callback_dma_overlapped_time_s,
+            "callback_hbm_read_overlapped_time_s": self.callback_hbm_read_overlapped_time_s,
+            "callback_hbm_write_overlapped_time_s": self.callback_hbm_write_overlapped_time_s,
+            "callback_hbm_overlapped_time_s": self.callback_hbm_overlapped_time_s,
+            "callback_nvlink_overlapped_time_s": self.callback_nvlink_overlapped_time_s,
+            "callback_pcie_overlapped_time_s": self.callback_pcie_overlapped_time_s,
+            "eviction_dma_overlapped_time_s": self.eviction_dma_overlapped_time_s,
+            "eviction_hbm_read_overlapped_time_s": self.eviction_hbm_read_overlapped_time_s,
+            "eviction_hbm_write_overlapped_time_s": self.eviction_hbm_write_overlapped_time_s,
+            "eviction_hbm_overlapped_time_s": self.eviction_hbm_overlapped_time_s,
+            "eviction_nvlink_overlapped_time_s": self.eviction_nvlink_overlapped_time_s,
+            "eviction_pcie_overlapped_time_s": self.eviction_pcie_overlapped_time_s,
+            "max_callback_dma_active_domains": self.max_callback_dma_active_domains,
+            "max_callback_hbm_read_active_domains": self.max_callback_hbm_read_active_domains,
+            "max_callback_hbm_write_active_domains": self.max_callback_hbm_write_active_domains,
+            "max_callback_nvlink_active_domains": self.max_callback_nvlink_active_domains,
+            "max_callback_pcie_active_domains": self.max_callback_pcie_active_domains,
+            "max_eviction_dma_active_domains": self.max_eviction_dma_active_domains,
+            "max_eviction_hbm_read_active_domains": self.max_eviction_hbm_read_active_domains,
+            "max_eviction_hbm_write_active_domains": self.max_eviction_hbm_write_active_domains,
+            "max_eviction_nvlink_active_domains": self.max_eviction_nvlink_active_domains,
+            "max_eviction_pcie_active_domains": self.max_eviction_pcie_active_domains,
             "dma_time_s": self.dma_time_s,
             "pcie_time_s": self.pcie_time_s,
             "migration_bytes": self.migration_bytes,
