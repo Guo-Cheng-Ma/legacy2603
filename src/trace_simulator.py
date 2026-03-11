@@ -579,6 +579,8 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'cross_card_time_s',
         'migration_time_s',
         'callback_migration_time_s',
+        'total_eviction_time_s',
+        'charged_eviction_time_s',
         'overlapped_eviction_time_s',
         'migration_bytes',
         'prefill_work_time_s',

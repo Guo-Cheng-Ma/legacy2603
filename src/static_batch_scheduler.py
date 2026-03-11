@@ -34,6 +34,8 @@ class StaticBatchScheduler:
         self.parallel_ff = bool(parallel_ff)
         self.debug = debug
         self.debug_interval = max(1, int(debug_interval))
+        self.die_type = str((kv_arch_cfg or {}).get("DIE_TYPE", "attacc")).lower()
+        self.charge_eviction_latency = self.die_type == "attacc"
         self.transfer_bw = get_hetero_transfer_bandwidths(kv_arch_cfg)
 
         self.step_count = 0
@@ -62,6 +64,8 @@ class StaticBatchScheduler:
         self.eviction_pcie_transfer_blocks = 0
         self.migration_bytes = 0
         self.callback_migration_time_s = 0.0
+        self.total_eviction_time_s = 0.0
+        self.charged_eviction_time_s = 0.0
         self.overlapped_eviction_time_s = 0.0
         self.cross_die_time_s = 0.0
         self.cross_card_time_s = 0.0
@@ -308,7 +312,12 @@ class StaticBatchScheduler:
         prefill_latency += batch_callback_time_s
         self.migration_time_s += batch_callback_time_s
         self.callback_migration_time_s += batch_callback_time_s
-        self.overlapped_eviction_time_s += batch_eviction_time_s
+        self.total_eviction_time_s += batch_eviction_time_s
+        if self.charge_eviction_latency:
+            prefill_latency += batch_eviction_time_s
+            self.charged_eviction_time_s += batch_eviction_time_s
+        else:
+            self.overlapped_eviction_time_s += batch_eviction_time_s
         self.dma_time_s += batch_same_die_time_s
         self.cross_die_time_s += batch_cross_die_time_s
         self.cross_card_time_s += batch_cross_card_time_s
@@ -478,6 +487,8 @@ class StaticBatchScheduler:
             "decode_steps": self.decode_steps,
             "migration_time_s": self.migration_time_s,
             "callback_migration_time_s": self.callback_migration_time_s,
+            "total_eviction_time_s": self.total_eviction_time_s,
+            "charged_eviction_time_s": self.charged_eviction_time_s,
             "overlapped_eviction_time_s": self.overlapped_eviction_time_s,
             "dma_time_s": self.dma_time_s,
             "pcie_time_s": self.pcie_time_s,
