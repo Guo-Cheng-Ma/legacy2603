@@ -57,7 +57,8 @@ timeline.csv                   # Step-by-step change log (append after each comm
 4. **`llm-req-inputs/` files are large** - never `cat` them entirely; use `head` or load programmatically.
 5. **`ramulator.out`** is a cache file that accelerates simulation - do not delete or corrupt it.
 6. **Python frontend only** - modifications go in `src/` and `main.py`.
-7. **Git push requires proxy** - run `source /etc/profile.d/clash.sh && proxy_on` before `git push`, or use SSH remote.
+7. **Git push via SSH** - use `git push git@github.com:pku-lemonade/vStack.git main` (HTTPS proxy is unreliable).
+8. **Maintain `TODO.local.md`** at the repo root as a Markdown working checklist during active tasks; keep it untracked unless the user explicitly asks to commit it.
 
 ## Python Environment
 
