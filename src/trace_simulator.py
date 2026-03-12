@@ -27,6 +27,24 @@ def _percentile(values: List[float], ratio: float) -> float:
     return ordered[idx]
 
 
+def _format_duration_hms(total_seconds: float) -> str:
+    rounded_total = round(max(float(total_seconds), 0.0), 2)
+    hours = int(rounded_total // 3600)
+    remaining = rounded_total - (hours * 3600)
+    minutes = int(remaining // 60)
+    seconds = round(remaining - (minutes * 60), 2)
+
+    if seconds >= 60.0:
+        seconds -= 60.0
+        minutes += 1
+    if minutes >= 60:
+        minutes -= 60
+        hours += 1
+
+    seconds_text = "{:.2f}".format(seconds).rstrip("0").rstrip(".")
+    return f"{hours} hours, {minutes} minutes, {seconds_text} seconds"
+
+
 def _build_kv_cache(system, kv_arch_cfg: Dict) -> Tuple[KVCacheManager, Dict]:
     a_byte = _activation_bytes(system.model.dtype)
     kv_bytes_per_token = system.model.ndec * 2 * system.model.hdim * a_byte
@@ -144,6 +162,7 @@ def _summarize_requests(requests: List[RequestState], total_time: float) -> Dict
         'num_requests': num_requests,
         'total_time_s': total_time,
         'arrival_span_s': arrival_span_s,
+        'trace_qps': arrival_rate_req,
         'arrival_rate_req_per_s': arrival_rate_req,
         'avg_latency_s': avg_latency,
         'p50_latency_s': _percentile(latencies, 0.50),
@@ -357,6 +376,7 @@ def run_trace_simulation(
     summary['kv_cache_used_gb'] = summary.get('used_bytes', 0) / (1024.0 * 1024.0 * 1024.0)
     summary['kv_cache_free_gb'] = summary.get('free_bytes', 0) / (1024.0 * 1024.0 * 1024.0)
     summary['trace_window_s'] = snapshot.sim_time
+    summary['overall_lasting_time'] = _format_duration_hms(snapshot.sim_time)
 
     total_kv = summary['kv_hit_blocks'] + summary['kv_miss_blocks']
     summary['kv_hit_rate'] = (summary['kv_hit_blocks'] / total_kv) if total_kv > 0 else 0.0
@@ -508,10 +528,12 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'kv_cache_free_gb',
         'num_requests',
         'total_time_s',
+        'overall_lasting_time',
         'num_singleturn_requests',
         'num_multiturn_requests',
         'trace_window_s',
         'arrival_span_s',
+        'trace_qps',
         'arrival_rate_req_per_s',
         'total_input_tokens',
         'total_output_tokens',
