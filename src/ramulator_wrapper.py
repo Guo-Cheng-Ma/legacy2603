@@ -29,7 +29,6 @@ class Ramulator:
         self.tCK = 0.769  # ns
         self.num_pim_die = num_pim_die
         self.nhead = modelinfos['num_heads']
-        self.dhead = modelinfos['dhead']
         self.fast_mode = fast_mode
 
     def _load_cache_df(self, path):
@@ -146,7 +145,7 @@ class Ramulator:
                 os.remove(tmp_log)
 
     #def run_ramulator(self):
-    def run_ramulator(self, pim_type: PIMType, l, num_ops_per_hbm, dbyte,
+    def run_ramulator(self, pim_type: PIMType, l, num_ops_per_hbm, dhead, dbyte,
                       yaml_file, file_name):
         pim_type_name = pim_type.name.lower(
         ) if not pim_type == PIMType.BA else "bank"
@@ -166,7 +165,7 @@ class Ramulator:
                     sys.executable,
                     trace_exc,
                     "--dhead",
-                    str(self.dhead),
+                    str(dhead),
                     "--nhead",
                     str(num_ops_per_hbm),
                     "--seqlen",
@@ -231,7 +230,10 @@ class Ramulator:
     def run(self, pim_type: PIMType, layer: Layer, power_constraint=True):
         if os.path.exists(self.ramulator_dir):
             l = layer.n
-            dhead = self.dhead
+            # Cache keys and trace generation must follow the realized layer
+            # shape, not the static model table, so warm pre-generated caches
+            # match runtime lookups for models such as Qwen3.
+            dhead = layer.k
             dbyte = layer.dbyte
             num_ops_per_attacc = layer.numOp
             num_ops_per_pim_die = math.ceil(num_ops_per_attacc / self.num_pim_die)
@@ -247,6 +249,7 @@ class Ramulator:
             self.make_yaml_file(yaml_file, file_name, power_constraint)
 
             result = self.run_ramulator(pim_type, l, num_ops_per_pim_die,
+                                        dhead,
                                         layer.dbyte, yaml_file, file_name)
 
             # remove yaml
