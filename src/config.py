@@ -248,19 +248,21 @@ def load_hetero_kv_arch_config(yaml_path=None) -> dict:
         "BANKS_PER_DIE_PACKAGE": int(_required_numeric(normalized, "BANKS_PER_DIE_PACKAGE")),
         "FULL_DIE_CAPACITY_GB": _required_numeric(normalized, "FULL_DIE_CAPACITY_GB"),
     }
-    if validated["DIE_TYPE"] not in {"attacc", "vstack"}:
+    if validated["DIE_TYPE"] not in {"attacc", "vstack", "uniform"}:
         raise ValueError(f"unsupported die_type: {validated['DIE_TYPE']}")
     if validated["DIE_TYPE"] == "attacc":
         max_pim_die = validated["NUM_DIE_PACKAGES_PER_CARD"] - 1
         if validated["NUM_PIM_DIE"] < 0 or validated["NUM_PIM_DIE"] > max_pim_die:
             raise ValueError(f"num_pim_die must be in [0, {max_pim_die}] for attacc")
-    else:
+    elif validated["DIE_TYPE"] == "vstack":
         total_stacks = validated["STACKS_PER_DIE_PACKAGE"]
         if validated["COMPUTE_STACK_L1"] + validated["CAPACITY_STACK_L2"] != total_stacks:
             raise ValueError(
                 "compute_stack_l1 + capacity_stack_l2 must equal "
                 f"{total_stacks} for vstack"
             )
+    else:
+        validated["NUM_PIM_DIE"] = validated["NUM_DIE_PACKAGES_PER_CARD"]
     return validated
 
 
@@ -282,6 +284,11 @@ def get_hetero_memory_topology(hetero_kv_arch: dict = None) -> dict:
         l2_die_capacity_bytes = int(capacity_stack_l2 * full_stack_capacity_bytes)
         l1_die_ids = tuple(range(num_die_packages))
         l2_die_ids = tuple(range(num_die_packages))
+    elif die_type == "uniform":
+        l1_die_capacity_bytes = int(full_die_capacity_bytes * PIM_DIE_CAPACITY_RATIO)
+        l2_die_capacity_bytes = 0
+        l1_die_ids = tuple(range(num_die_packages))
+        l2_die_ids = tuple()
     else:
         num_pim_die = int(cfg["NUM_PIM_DIE"])
         l1_die_capacity_bytes = int(full_die_capacity_bytes * PIM_DIE_CAPACITY_RATIO) if num_pim_die > 0 else 0
@@ -326,6 +333,23 @@ def get_hetero_transfer_bandwidths(hetero_kv_arch: dict = None) -> dict:
     }
 
 
+def validate_hetero_weight_capacity(weight_bytes_total: int = 0, hetero_kv_arch: dict = None) -> None:
+    cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
+    topo = get_hetero_memory_topology(cfg)
+    weight_bytes = max(0, int(weight_bytes_total))
+    if topo["die_type"] != "uniform":
+        return
+
+    l1_total = topo["l1_per_card_bytes"] * topo["num_cards"]
+    if weight_bytes > l1_total:
+        raise ValueError(
+            "uniform mode requires all weights to fit in aggregate L1: "
+            f"weights={bytes_to_gib(weight_bytes):.3f} GiB, "
+            f"available_l1={bytes_to_gib(l1_total):.3f} GiB "
+            f"({topo['num_cards']} cards x {topo['l1_per_card_gb']:.3f} GiB/card)"
+        )
+
+
 def get_hetero_kv_capacities(weight_bytes_total: int = 0, hetero_kv_arch: dict = None) -> dict:
     """Return architecture-derived global KV capacities for L1/L2/L3 tiers."""
     cfg = DEFAULT_HETERO_KV_ARCH if hetero_kv_arch is None else hetero_kv_arch
@@ -335,25 +359,49 @@ def get_hetero_kv_capacities(weight_bytes_total: int = 0, hetero_kv_arch: dict =
     l3_total = gib_to_bytes(cfg["HOST_KV_TOTAL_GB"])
 
     weight_bytes = max(0, int(weight_bytes_total))
-    l2_kv = max(0, l2_total - weight_bytes)
+    validate_hetero_weight_capacity(weight_bytes_total=weight_bytes, hetero_kv_arch=cfg)
+    if topo["die_type"] == "uniform":
+        l1_weight_reserved_bytes = weight_bytes
+        l2_weight_reserved_bytes = 0
+        l1_kv = max(0, l1_total - weight_bytes)
+        l2_kv = 0
+    else:
+        l1_weight_reserved_bytes = 0
+        l2_weight_reserved_bytes = weight_bytes
+        l1_kv = l1_total
+        l2_kv = max(0, l2_total - weight_bytes)
+
+    l1_kv_die_capacity_bytes = 0
+    l1_kv_bank_capacity_bytes = 0
+    if topo["num_l1_dies_total"] > 0:
+        l1_kv_die_capacity_bytes = int(l1_kv / topo["num_l1_dies_total"])
+        if topo["banks_per_die"] > 0:
+            l1_kv_bank_capacity_bytes = int(l1_kv_die_capacity_bytes / topo["banks_per_die"])
     l2_kv_die_capacity_bytes = 0
     if topo["num_l2_dies_total"] > 0:
         l2_kv_die_capacity_bytes = int(l2_kv / topo["num_l2_dies_total"])
     return {
-        "l1_kv_bytes": l1_total,
+        "l1_kv_bytes": l1_kv,
+        "l1_total_bytes": l1_total,
         "l2_total_bytes": l2_total,
         "l2_kv_bytes": l2_kv,
         "l3_kv_bytes": l3_total,
         "weight_bytes_total": weight_bytes,
+        "weight_reservation_tier": "L1" if topo["die_type"] == "uniform" else "L2",
+        "l1_weight_reserved_bytes": l1_weight_reserved_bytes,
+        "l2_weight_reserved_bytes": l2_weight_reserved_bytes,
         "gpu_mem_per_card_bytes": topo["gpu_mem_per_card_bytes"],
         "gpu_mem_per_card_gb": topo["gpu_mem_per_card_gb"],
-        "hispeed_kv_per_card_gb": topo["l1_per_card_gb"],
+        "hispeed_kv_per_card_gb": bytes_to_gib(l1_kv / topo["num_cards"]) if topo["num_cards"] > 0 else 0.0,
+        "hispeed_total_per_card_gb": topo["l1_per_card_gb"],
         "hicap_total_per_card_gb": topo["l2_per_card_gb"],
         "num_die_packages_per_card": topo["num_die_packages_per_card"],
         "banks_per_die": topo["banks_per_die"],
         "l1_die_capacity_bytes": topo["l1_die_capacity_bytes"],
         "l2_die_capacity_bytes": topo["l2_die_capacity_bytes"],
+        "l1_kv_die_capacity_bytes": l1_kv_die_capacity_bytes,
         "l1_bank_capacity_bytes": topo["l1_bank_capacity_bytes"],
+        "l1_kv_bank_capacity_bytes": l1_kv_bank_capacity_bytes,
         "l2_kv_die_capacity_bytes": l2_kv_die_capacity_bytes,
         "l1_die_ids": topo["l1_die_ids"],
         "l2_die_ids": topo["l2_die_ids"],
@@ -447,7 +495,7 @@ def make_xpu_config(gpu_type: GPUType,
         "FULL_DIE_CAPACITY_GB": FULL_HBM_DIE_CAPACITY_GB,
     })
     total_hbm_dies = topo["num_die_packages_per_card"]
-    if die_type == 'vstack':
+    if die_type in ['vstack', 'uniform']:
         raw_hbm_dies = total_hbm_dies
         raw_hbm_ratio = 1.0
         capacity_per_device_bytes = topo["gpu_mem_per_card_bytes"]

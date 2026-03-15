@@ -61,7 +61,7 @@ def _build_kv_cache(system, kv_arch_cfg: Dict) -> Tuple[KVCacheManager, Dict]:
             "banks_per_die": tier_caps["banks_per_die"],
             "l1_die_ids": tier_caps["l1_die_ids"],
             "l2_die_ids": tier_caps["l2_die_ids"],
-            "l1_bank_capacity_bytes": max(tier_caps["l1_bank_capacity_bytes"], kv_bytes_per_block),
+            "l1_bank_capacity_bytes": tier_caps["l1_kv_bank_capacity_bytes"],
             "l2_kv_die_capacity_bytes": tier_caps["l2_kv_die_capacity_bytes"],
             "l3_kv_bytes": tier_caps["l3_kv_bytes"],
             "card_total_bw_bps": system.devices['GPU'].peak_memory_bandwidth,
@@ -363,9 +363,14 @@ def run_trace_simulation(
     summary['pcie_bw_bps_cfg'] = bw_cfg["pcie_bw_bps"]
     summary['gpu_mem_per_card_gb_cfg'] = kv_caps["gpu_mem_per_card_gb"]
     summary['hispeed_kv_per_card_gb_cfg'] = kv_caps["hispeed_kv_per_card_gb"]
+    summary['hispeed_total_per_card_gb_cfg'] = kv_caps["hispeed_total_per_card_gb"]
     summary['hicap_total_per_card_gb_cfg'] = kv_caps["hicap_total_per_card_gb"]
     summary['weight_reserved_bytes'] = kv_caps["weight_bytes_total"]
+    summary['weight_reservation_tier'] = kv_caps["weight_reservation_tier"]
+    summary['l1_weight_reserved_bytes'] = kv_caps["l1_weight_reserved_bytes"]
+    summary['l2_weight_reserved_bytes'] = kv_caps["l2_weight_reserved_bytes"]
     summary['l1_kv_capacity_bytes_cfg'] = kv_caps["l1_kv_bytes"]
+    summary['l1_total_bytes_cfg'] = kv_caps["l1_total_bytes"]
     summary['l2_total_bytes_cfg'] = kv_caps["l2_total_bytes"]
     summary['l2_kv_capacity_bytes_cfg'] = kv_caps["l2_kv_bytes"]
     summary['l3_kv_capacity_bytes_cfg'] = kv_caps["l3_kv_bytes"]
@@ -510,9 +515,14 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'pcie_bw_bps_cfg',
         'gpu_mem_per_card_gb_cfg',
         'hispeed_kv_per_card_gb_cfg',
+        'hispeed_total_per_card_gb_cfg',
         'hicap_total_per_card_gb_cfg',
         'weight_reserved_bytes',
+        'weight_reservation_tier',
+        'l1_weight_reserved_bytes',
+        'l2_weight_reserved_bytes',
         'l1_kv_capacity_bytes_cfg',
+        'l1_total_bytes_cfg',
         'l2_total_bytes_cfg',
         'l2_kv_capacity_bytes_cfg',
         'l3_kv_capacity_bytes_cfg',

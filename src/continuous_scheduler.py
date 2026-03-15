@@ -49,7 +49,7 @@ class ContinuousScheduler:
         self.debug_interval = max(1, int(debug_interval))
         self.step_count = 0
         self.die_type = str((kv_arch_cfg or {}).get("DIE_TYPE", "attacc")).lower()
-        self.charge_eviction_latency = self.die_type == "attacc"
+        self.charge_eviction_latency = self.die_type in {"attacc", "uniform"}
         self.transfer_bw = get_hetero_transfer_bandwidths(kv_arch_cfg)
 
         self.sim_time = 0.0

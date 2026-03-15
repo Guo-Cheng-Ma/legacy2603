@@ -125,13 +125,13 @@ def main():
 
     if args.system == 'dgx-attacc':
         die_type = args.die_type
-        if die_type == 'vstack':
+        if die_type in ['vstack', 'uniform']:
             num_pim_die = 5  # all dies are hybrid
         else:
             num_pim_die = args.num_pim_die
             if num_pim_die >= 5:
                 print("ERROR: attacc mode requires num_pim_die < 5 (GPU needs at least 1 HBM die for BW); "
-                      "use die_type: vstack for all-hybrid dies")
+                      "use die_type: vstack or uniform for all-hybrid dies")
                 raise SystemExit(1)
         print("{}: ({} x {}), PIM:{}, die-type:{}, [Lin, Lout, batch]: {}".format(
             args.system, args.gpu, args.ngpu, args.pim, die_type,
@@ -156,6 +156,10 @@ def main():
                                   compute_stack_l1=args.compute_stack_l1,
                                   capacity_stack_l2=args.capacity_stack_l2)
     system = System(xpu_config['GPU'], modelinfos)
+    if args.system in ['dgx-attacc']:
+        kv_arch_cfg = load_hetero_kv_arch_config(args.kv_arch_config)
+        weight_bytes, _, _ = system.get_required_mem_capacity(batch_size=1, lin=1, lout=1)
+        validate_hetero_weight_capacity(weight_bytes_total=weight_bytes, hetero_kv_arch=kv_arch_cfg)
     if args.system in ['dgx-attacc']:
         if args.pim == "bg":
             pim_type = PIMType.BG
