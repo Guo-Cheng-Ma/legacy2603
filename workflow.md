@@ -330,13 +330,15 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
 1. Config load:
    - run `python3 main.py --config <existing-config>.yaml`
    - confirm the YAML loads without relying on deleted legacy config files
-2. Fixed-mode smoke:
+2. Documentation sync:
+   - if simulator functionality, spec, outputs, or workflow changed, update `workflow.md`, `architecture_summary.md`, and `AGENTS.md` in the same change step before committing
+3. Fixed-mode smoke:
    - set `workload.mode: fixed`
    - confirm `output.csv` is produced
-3. Trace-mode smoke:
+4. Trace-mode smoke:
    - set `workload.mode: trace`
    - confirm `results/<date>/<trace>/S-...yaml` and `R-...jsonl` are produced
-4. Trace sanity checks:
+5. Trace sanity checks:
    - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, and `trace_qps`
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
    - when policy mode is enabled, verify `eviction_policy_cfg`, `placement_policy_cfg`, `replica_*`, and `same_chat_hit_rate`
