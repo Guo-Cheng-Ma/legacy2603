@@ -1,6 +1,7 @@
 from src.type import *
 import argparse
 import copy
+from pathlib import Path
 
 SCALING_FACTOR = {}
 SCALING_FACTOR['MAX_COMPUTE_UTIL'] = 0.8
@@ -31,6 +32,122 @@ DEFAULT_HETERO_KV_ARCH = {
     "FULL_DIE_CAPACITY_GB": FULL_HBM_DIE_CAPACITY_GB,
 }
 
+DEFAULT_AWARE_POLICY = {
+    "CATEGORY_KEYS": ["request_type", "turn_class"],
+    "INTRA_USER_BIAS": True,
+    "SINGLE_TURN_BIAS": True,
+    "TTL_MODE": "category_ema",
+    "TTL_SAFETY_FACTOR": 1.0,
+    "RECENCY_WEIGHT": 1.0,
+    "REUSE_WEIGHT": 1.0,
+    "LOCALITY_WEIGHT": 1.0,
+    "COST_WEIGHT": 1.0,
+    "HOTNESS_CAP": 8,
+    "REPLICA_MIN_DISTINCT_CARDS": 3,
+    "REPLICA_MIN_REMOTE_HITS": 8,
+    "REPLICA_SCORE_THRESHOLD": 0.0,
+}
+
+DEFAULT_KV_POLICY = {
+    "EVICTION_POLICY": "lru",
+    "PLACEMENT_POLICY": "all_unique",
+    "REPLICA_TIER": "auto",
+    "REPLICA_RESERVE_RATIO_L1": None,
+    "REPLICA_RESERVE_RATIO_L2": None,
+    "AWARE_POLICY": copy.deepcopy(DEFAULT_AWARE_POLICY),
+}
+
+TRACE_MODEL_KV_POLICY_PRESETS = {
+    "GPT-175B": {
+        "traceA": {
+            "REPLICA_TIER": "L1",
+            "REPLICA_RESERVE_RATIO_L1": 0.20,
+            "REPLICA_RESERVE_RATIO_L2": 0.0,
+        },
+        "traceB": {
+            "REPLICA_TIER": "L1",
+            "REPLICA_RESERVE_RATIO_L1": 0.15,
+            "REPLICA_RESERVE_RATIO_L2": 0.0,
+        },
+        "thinking": {
+            "REPLICA_TIER": "L1",
+            "REPLICA_RESERVE_RATIO_L1": 0.05,
+            "REPLICA_RESERVE_RATIO_L2": 0.0,
+        },
+        "coder": {
+            "REPLICA_TIER": "L1",
+            "REPLICA_RESERVE_RATIO_L1": 0.25,
+            "REPLICA_RESERVE_RATIO_L2": 0.0,
+        },
+    },
+    "Qwen3-32B": {
+        "traceA": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.03,
+        },
+        "traceB": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.03,
+        },
+        "thinking": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.01,
+        },
+        "coder": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.10,
+        },
+    },
+    "Qwen3-4B": {
+        "traceA": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.02,
+        },
+        "traceB": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.03,
+        },
+        "thinking": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.10,
+        },
+        "coder": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.12,
+        },
+    },
+    "Mistral-Devstral2-123B": {
+        "traceA": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.25,
+        },
+        "traceB": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.25,
+        },
+        "thinking": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.07,
+        },
+        "coder": {
+            "REPLICA_TIER": "L2",
+            "REPLICA_RESERVE_RATIO_L1": 0.0,
+            "REPLICA_RESERVE_RATIO_L2": 0.25,
+        },
+    },
+}
+
 
 def gib_to_bytes(gib: float) -> int:
     return int(float(gib) * 1024 * 1024 * 1024)
@@ -55,18 +172,31 @@ def _required_numeric(cfg, key):
 def _parse_simple_yaml_map(yaml_text: str) -> dict:
     """
     Minimal YAML parser for this project config format.
-    Supports flat key:value pairs and one top-level nested map (e.g., kv_arch:).
+    Supports flat key:value pairs and up to two nested map levels.
     """
     root = {}
     section = None
+    subsection = None
     for raw in yaml_text.splitlines():
         line = raw.split('#', 1)[0].rstrip()
         if not line.strip():
             continue
 
-        if not raw.startswith(' ') and line.endswith(':'):
+        indent = len(raw) - len(raw.lstrip(' '))
+
+        if indent == 0 and line.endswith(':'):
             section = line[:-1].strip()
+            subsection = None
             root.setdefault(section, {})
+            continue
+
+        if indent == 2 and line.endswith(':') and section:
+            subsection = line[:-1].strip()
+            parent = root.setdefault(section, {})
+            if not isinstance(parent, dict):
+                parent = {}
+                root[section] = parent
+            parent.setdefault(subsection, {})
             continue
 
         if ':' not in line:
@@ -97,9 +227,75 @@ def _parse_simple_yaml_map(yaml_text: str) -> dict:
                     except ValueError:
                         parsed = value
 
-        target = root[section] if raw.startswith(' ') and section else root
+        if indent >= 4 and section and subsection:
+            target = root[section][subsection]
+        elif indent >= 2 and section:
+            target = root[section]
+            subsection = None
+        else:
+            target = root
+            subsection = None
         target[key] = parsed
     return root
+
+
+def _normalize_optional_ratio(value, key: str):
+    if value is None:
+        return None
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a float in [0.0, 1.0], got {value}")
+    if ratio < 0.0 or ratio > 1.0:
+        raise ValueError(f"{key} must be in [0.0, 1.0], got {ratio}")
+    return ratio
+
+
+def _deep_merge_policy(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_policy(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _normalize_aware_policy(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    key_map = {
+        "category_keys": "CATEGORY_KEYS",
+        "intra_user_bias": "INTRA_USER_BIAS",
+        "single_turn_bias": "SINGLE_TURN_BIAS",
+        "ttl_mode": "TTL_MODE",
+        "ttl_safety_factor": "TTL_SAFETY_FACTOR",
+        "recency_weight": "RECENCY_WEIGHT",
+        "reuse_weight": "REUSE_WEIGHT",
+        "locality_weight": "LOCALITY_WEIGHT",
+        "cost_weight": "COST_WEIGHT",
+        "hotness_cap": "HOTNESS_CAP",
+        "replica_min_distinct_cards": "REPLICA_MIN_DISTINCT_CARDS",
+        "replica_min_remote_hits": "REPLICA_MIN_REMOTE_HITS",
+        "replica_score_threshold": "REPLICA_SCORE_THRESHOLD",
+    }
+    normalized = {}
+    for key, value in raw.items():
+        normalized[key_map.get(str(key), str(key).upper())] = value
+    return normalized
+
+
+def infer_trace_family(trace_file: str = "") -> str:
+    name = Path(str(trace_file or "")).stem.lower()
+    if "tracea" in name:
+        return "traceA"
+    if "traceb" in name:
+        return "traceB"
+    if "thinking" in name:
+        return "thinking"
+    if "coder" in name:
+        return "coder"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +394,9 @@ def load_unified_config(yaml_path: str) -> argparse.Namespace:
 def load_hetero_kv_arch_config(yaml_path=None) -> dict:
     """Load heterogeneous KV architecture config from YAML path, inline dict, or defaults."""
     cfg = copy.deepcopy(DEFAULT_HETERO_KV_ARCH)
+    policy_defaults = copy.deepcopy(DEFAULT_KV_POLICY)
     if yaml_path is None:
+        cfg.update(policy_defaults)
         return cfg
 
     # Accept a pre-parsed dict (from unified config's kv_arch section)
@@ -232,6 +430,15 @@ def load_hetero_kv_arch_config(yaml_path=None) -> dict:
         "STACKS_PER_DIE_PACKAGE": root.get("stacks_per_die_package", cfg["STACKS_PER_DIE_PACKAGE"]),
         "BANKS_PER_DIE_PACKAGE": root.get("banks_per_die_package", cfg["BANKS_PER_DIE_PACKAGE"]),
         "FULL_DIE_CAPACITY_GB": root.get("full_die_capacity_gb", cfg["FULL_DIE_CAPACITY_GB"]),
+        "EVICTION_POLICY": str(root.get("eviction_policy", policy_defaults["EVICTION_POLICY"])).lower(),
+        "PLACEMENT_POLICY": str(root.get("placement_policy", policy_defaults["PLACEMENT_POLICY"])).lower(),
+        "REPLICA_TIER": str(root.get("replica_tier", policy_defaults["REPLICA_TIER"])).upper(),
+        "REPLICA_RESERVE_RATIO_L1": root.get("replica_reserve_ratio_l1", policy_defaults["REPLICA_RESERVE_RATIO_L1"]),
+        "REPLICA_RESERVE_RATIO_L2": root.get("replica_reserve_ratio_l2", policy_defaults["REPLICA_RESERVE_RATIO_L2"]),
+        "AWARE_POLICY": _deep_merge_policy(
+            policy_defaults["AWARE_POLICY"],
+            _normalize_aware_policy(root.get("aware_policy", {})),
+        ),
     }
 
     validated = {
@@ -247,7 +454,23 @@ def load_hetero_kv_arch_config(yaml_path=None) -> dict:
         "STACKS_PER_DIE_PACKAGE": int(_required_numeric(normalized, "STACKS_PER_DIE_PACKAGE")),
         "BANKS_PER_DIE_PACKAGE": int(_required_numeric(normalized, "BANKS_PER_DIE_PACKAGE")),
         "FULL_DIE_CAPACITY_GB": _required_numeric(normalized, "FULL_DIE_CAPACITY_GB"),
+        "EVICTION_POLICY": normalized["EVICTION_POLICY"],
+        "PLACEMENT_POLICY": normalized["PLACEMENT_POLICY"],
+        "REPLICA_TIER": normalized["REPLICA_TIER"],
+        "REPLICA_RESERVE_RATIO_L1": _normalize_optional_ratio(
+            normalized["REPLICA_RESERVE_RATIO_L1"], "replica_reserve_ratio_l1"
+        ),
+        "REPLICA_RESERVE_RATIO_L2": _normalize_optional_ratio(
+            normalized["REPLICA_RESERVE_RATIO_L2"], "replica_reserve_ratio_l2"
+        ),
+        "AWARE_POLICY": copy.deepcopy(normalized["AWARE_POLICY"]),
     }
+    if validated["EVICTION_POLICY"] not in {"lru", "aware"}:
+        raise ValueError(f"unsupported eviction_policy: {validated['EVICTION_POLICY']}")
+    if validated["PLACEMENT_POLICY"] not in {"all_unique", "hotset_broadcast"}:
+        raise ValueError(f"unsupported placement_policy: {validated['PLACEMENT_POLICY']}")
+    if validated["REPLICA_TIER"] not in {"AUTO", "L1", "L2"}:
+        raise ValueError(f"unsupported replica_tier: {validated['REPLICA_TIER']}")
     if validated["DIE_TYPE"] not in {"attacc", "vstack", "uniform"}:
         raise ValueError(f"unsupported die_type: {validated['DIE_TYPE']}")
     if validated["DIE_TYPE"] == "attacc":
@@ -264,6 +487,37 @@ def load_hetero_kv_arch_config(yaml_path=None) -> dict:
     else:
         validated["NUM_PIM_DIE"] = validated["NUM_DIE_PACKAGES_PER_CARD"]
     return validated
+
+
+def resolve_kv_policy_config(model_name: str, trace_file: str, hetero_kv_arch: dict = None) -> dict:
+    cfg = load_hetero_kv_arch_config(hetero_kv_arch)
+    resolved = copy.deepcopy(cfg)
+    trace_family = infer_trace_family(trace_file)
+    preset = TRACE_MODEL_KV_POLICY_PRESETS.get(str(model_name), {}).get(trace_family, {})
+
+    if resolved.get("REPLICA_TIER", "AUTO") == "AUTO" and "REPLICA_TIER" in preset:
+        resolved["REPLICA_TIER"] = preset["REPLICA_TIER"]
+    if resolved.get("REPLICA_RESERVE_RATIO_L1") is None and "REPLICA_RESERVE_RATIO_L1" in preset:
+        resolved["REPLICA_RESERVE_RATIO_L1"] = preset["REPLICA_RESERVE_RATIO_L1"]
+    if resolved.get("REPLICA_RESERVE_RATIO_L2") is None and "REPLICA_RESERVE_RATIO_L2" in preset:
+        resolved["REPLICA_RESERVE_RATIO_L2"] = preset["REPLICA_RESERVE_RATIO_L2"]
+
+    resolved.setdefault("AWARE_POLICY", copy.deepcopy(DEFAULT_AWARE_POLICY))
+    resolved["AWARE_POLICY"] = _deep_merge_policy(DEFAULT_AWARE_POLICY, resolved["AWARE_POLICY"])
+
+    # Keep broadcast disabled by default unless the user explicitly enables it.
+    if resolved["PLACEMENT_POLICY"] == "all_unique":
+        resolved["REPLICA_RESERVE_RATIO_L1"] = 0.0
+        resolved["REPLICA_RESERVE_RATIO_L2"] = 0.0
+    else:
+        if resolved["REPLICA_RESERVE_RATIO_L1"] is None:
+            resolved["REPLICA_RESERVE_RATIO_L1"] = 0.0
+        if resolved["REPLICA_RESERVE_RATIO_L2"] is None:
+            resolved["REPLICA_RESERVE_RATIO_L2"] = 0.0
+
+    resolved["TRACE_FAMILY"] = trace_family
+    resolved["MODEL_NAME"] = str(model_name)
+    return resolved
 
 
 def get_hetero_memory_topology(hetero_kv_arch: dict = None) -> dict:

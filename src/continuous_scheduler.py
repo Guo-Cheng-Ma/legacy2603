@@ -108,6 +108,10 @@ class ContinuousScheduler:
         self.cross_card_time_s = 0.0
         self.cross_die_transfer_blocks = 0
         self.cross_card_transfer_blocks = 0
+        self.replica_fanout_time_s = 0.0
+        self.replica_fanout_bytes = 0
+        self.replica_fanout_blocks = 0
+        self.avoided_cross_card_callbacks = 0
 
         if self.kv_cache is not None:
             for req in self.requests:
@@ -226,6 +230,9 @@ class ContinuousScheduler:
             cross_card_time_s = 0.0
             pcie_time_s = 0.0
             migration_bytes = 0
+            replica_fanout_time_s = 0.0
+            replica_fanout_bytes = 0
+            replica_fanout_blocks = 0
             for block_idx in block_indices:
                 hash_id = req.trace.hash_ids[block_idx]
                 if self.kv_cache is None:
@@ -233,7 +240,15 @@ class ContinuousScheduler:
                     req.computed_blocks += 1
                     continue
 
-                access = self.kv_cache.access(hash_id, target_card=req.home_card, target_die=req.home_die)
+                access = self.kv_cache.access(
+                    hash_id,
+                    target_card=req.home_card,
+                    target_die=req.home_die,
+                    sim_time=self.sim_time,
+                    chat_id=req.trace.chat_id,
+                    request_type=req.trace.request_type,
+                    turn_class=req.turn_class,
+                )
                 if self.debug and (access.hit_tier is not None and access.hit_tier != "L1"):
                     self._log(
                         "kv hit req={} hash_id={} tier={} promote_to_l1=yes".format(
@@ -296,6 +311,14 @@ class ContinuousScheduler:
                 req.callback_cross_die_blocks += access.callback_cross_die
                 req.callback_cross_card_blocks += access.callback_cross_card
                 req.migration_bytes += access.migration_bytes
+                req.same_chat_hit_blocks += access.same_chat_hit
+                req.cross_chat_hit_blocks += access.cross_chat_hit
+                req.single_turn_hit_blocks += access.single_turn_hit
+                req.multi_turn_hit_blocks += access.multi_turn_hit
+                req.replica_hit_blocks += access.replica_hit
+                req.replica_l1_hit_blocks += access.replica_l1_hit
+                req.replica_l2_hit_blocks += access.replica_l2_hit
+                req.avoided_cross_card_blocks += access.avoided_cross_card_callback
 
                 l1_hit_blocks += access.l1_hit
                 l2_hit_blocks += access.l2_hit
@@ -323,6 +346,10 @@ class ContinuousScheduler:
                 cross_card_time_s += access.cross_card_time_s
                 pcie_time_s += access.pcie_time_s
                 migration_bytes += access.migration_bytes
+                replica_fanout_time_s += access.replica_fanout_time_s
+                replica_fanout_bytes += access.replica_fanout_bytes
+                replica_fanout_blocks += access.replica_fanout_blocks
+                self.avoided_cross_card_callbacks += access.avoided_cross_card_callback
 
                 if access.is_hit:
                     req.reused_blocks += 1
@@ -349,16 +376,21 @@ class ContinuousScheduler:
                 self.overlapped_eviction_time_s += eviction_overlap.blocking_time_s
             self.dma_time_s += same_die_time_s
             self.cross_die_time_s += cross_die_time_s
-            self.cross_card_time_s += cross_card_time_s
+            self.cross_card_time_s += cross_card_time_s + replica_fanout_time_s
             self.pcie_time_s += pcie_time_s
-            self.migration_bytes += migration_bytes
+            self.migration_time_s += replica_fanout_time_s
+            self.migration_bytes += migration_bytes + replica_fanout_bytes
+            self.replica_fanout_time_s += replica_fanout_time_s
+            self.replica_fanout_bytes += replica_fanout_bytes
+            self.replica_fanout_blocks += replica_fanout_blocks
+            prefill_latency += replica_fanout_time_s
             self.dma_transfer_blocks += same_die_l1_to_l1_moves + same_die_l1_to_l2_moves + callback_same_die_blocks
             self.pcie_transfer_blocks += callback_from_l3_blocks + l2_to_l3_moves
             self.cross_die_transfer_blocks += (
                 cross_die_l1_to_l1_moves + cross_die_l1_to_l2_moves + cross_die_l2_to_l2_moves + callback_cross_die_blocks
             )
             self.cross_card_transfer_blocks += (
-                cross_card_l1_to_l2_moves + cross_card_l2_to_l2_moves + callback_cross_card_blocks
+                cross_card_l1_to_l2_moves + cross_card_l2_to_l2_moves + callback_cross_card_blocks + replica_fanout_blocks
             )
             self.callback_dma_transfer_blocks += callback_same_die_blocks
             self.callback_pcie_transfer_blocks += callback_from_l3_blocks
@@ -583,6 +615,10 @@ class ContinuousScheduler:
             "eviction_pcie_transfer_blocks": self.eviction_pcie_transfer_blocks,
             "cross_die_time_s": self.cross_die_time_s,
             "cross_card_time_s": self.cross_card_time_s,
+            "replica_fanout_time_s": self.replica_fanout_time_s,
+            "replica_fanout_bytes": self.replica_fanout_bytes,
+            "replica_fanout_blocks": self.replica_fanout_blocks,
+            "avoided_cross_card_callbacks": self.avoided_cross_card_callbacks,
         }
         components = ["dram", "l2", "l1", "reg", "alu", "comm"]
         for i, name in enumerate(components):

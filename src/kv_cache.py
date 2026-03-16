@@ -1,7 +1,8 @@
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Iterable, Optional, Tuple
+import math
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 
 class KVTier(str, Enum):
@@ -134,6 +135,17 @@ class KVCacheStats:
     callback_cross_die: int = 0
     callback_cross_card: int = 0
     callback_l3_to_l1: int = 0
+    same_chat_hits: int = 0
+    cross_chat_hits: int = 0
+    single_turn_hits: int = 0
+    multi_turn_hits: int = 0
+    replica_hits: int = 0
+    replica_l1_hits: int = 0
+    replica_l2_hits: int = 0
+    replica_fanout_blocks: int = 0
+    replica_evictions: int = 0
+    broadcast_promotions: int = 0
+    avoided_cross_card_callbacks: int = 0
 
 
 @dataclass
@@ -163,6 +175,17 @@ class KVAccessResult:
     pcie_time_s: float = 0.0
     callback_demands: KVTransferDomainDemands = field(default_factory=KVTransferDomainDemands)
     eviction_demands: KVTransferDomainDemands = field(default_factory=KVTransferDomainDemands)
+    same_chat_hit: int = 0
+    cross_chat_hit: int = 0
+    single_turn_hit: int = 0
+    multi_turn_hit: int = 0
+    replica_hit: int = 0
+    replica_l1_hit: int = 0
+    replica_l2_hit: int = 0
+    avoided_cross_card_callback: int = 0
+    replica_fanout_blocks: int = 0
+    replica_fanout_bytes: int = 0
+    replica_fanout_time_s: float = 0.0
 
     @property
     def l1_hit(self) -> int:
@@ -193,6 +216,39 @@ class KVAccessResult:
         return int(self.migration_bytes > 0) if self.migration_bytes <= 0 else int(self.migration_bytes)
 
 
+@dataclass
+class KVCategoryStats:
+    accesses: int = 0
+    hits: int = 0
+    reuse_gap_ema_s: float = 1.0
+
+
+@dataclass
+class KVRequestContext:
+    chat_id: Optional[int] = None
+    request_type: str = ""
+    turn_class: str = "single"
+    sim_time: float = 0.0
+    target_card: Optional[int] = None
+    target_die: Optional[int] = None
+
+
+@dataclass
+class KVBlockMetadata:
+    owner_chat_id: Optional[int] = None
+    request_type: str = ""
+    turn_class: str = "single"
+    insert_time_s: float = 0.0
+    last_access_time_s: float = 0.0
+    reuse_count: int = 0
+    last_reuse_gap_s: float = 0.0
+    predicted_ttl_s: float = 1.0
+    last_home_card: Optional[int] = None
+    last_home_die: Optional[int] = None
+    distinct_cards_seen: Set[int] = field(default_factory=set)
+    remote_hit_count: int = 0
+
+
 class KVCacheManager:
     """Topology-aware KV cache with L1 at (card, die, bank), L2 at (card, die), and global L3."""
 
@@ -200,6 +256,7 @@ class KVCacheManager:
         self,
         kv_bytes_per_block: int,
         topology: dict,
+        policy: Optional[dict] = None,
         spare_ratio: float = 0.01,
     ):
         if kv_bytes_per_block <= 0:
@@ -221,6 +278,17 @@ class KVCacheManager:
         self.nvlink_bw_bps = float(topology["nvlink_bw_bps"])
         self.dma_bw_bps = float(topology["dma_bw_bps"])
         self.pcie_bw_bps = float(topology["pcie_bw_bps"])
+        self.policy = dict(policy or {})
+        self.eviction_policy = str(self.policy.get("EVICTION_POLICY", "lru")).lower()
+        self.placement_policy = str(self.policy.get("PLACEMENT_POLICY", "all_unique")).lower()
+        self.aware_policy = dict(self.policy.get("AWARE_POLICY", {}))
+        self.replica_tier = str(self.policy.get("REPLICA_TIER", "AUTO")).upper()
+        self.replica_reserve_ratio_l1 = float(self.policy.get("REPLICA_RESERVE_RATIO_L1", 0.0) or 0.0)
+        self.replica_reserve_ratio_l2 = float(self.policy.get("REPLICA_RESERVE_RATIO_L2", 0.0) or 0.0)
+        self._current_request_context = KVRequestContext()
+        self._metadata: Dict[int, KVBlockMetadata] = {}
+        self._category_stats: Dict[Tuple[str, str], KVCategoryStats] = {}
+        self._global_reuse_gap_ema_s = 1.0
 
         self._l1_banks: Dict[Tuple[int, int, int], OrderedDict] = {}
         self._l1_used: Dict[Tuple[int, int, int], int] = {}
@@ -242,15 +310,37 @@ class KVCacheManager:
         self._l3 = OrderedDict()
         self._l3_used = 0
         self._locations: Dict[int, KVLocation] = {}
+        self._replica_locations: Dict[int, Dict[int, KVLocation]] = {}
+        self._replica_l1_cards: Dict[int, OrderedDict] = {}
+        self._replica_l1_used: Dict[int, int] = {}
+        self._replica_l2_cards: Dict[int, OrderedDict] = {}
+        self._replica_l2_used: Dict[int, int] = {}
+        for card in range(self.num_cards):
+            self._replica_l1_cards[card] = OrderedDict()
+            self._replica_l1_used[card] = 0
+            self._replica_l2_cards[card] = OrderedDict()
+            self._replica_l2_used[card] = 0
 
         self.stats = KVCacheStats()
         self._l1_total_capacity_bytes = len(self._l1_banks) * self.l1_bank_capacity_bytes
         self._l2_total_capacity_bytes = len(self._l2_dies) * self.l2_die_capacity_bytes
+        self._l1_replica_capacity_per_card_bytes = int(
+            (self._l1_total_capacity_bytes / max(self.num_cards, 1)) * self.replica_reserve_ratio_l1
+        )
+        self._l2_replica_capacity_per_card_bytes = int(
+            (self._l2_total_capacity_bytes / max(self.num_cards, 1)) * self.replica_reserve_ratio_l2
+        )
         self.capacity_bytes = self._l1_total_capacity_bytes + self._l2_total_capacity_bytes + self.l3_capacity_bytes
 
     @property
     def used_bytes(self) -> int:
-        return sum(self._l1_used.values()) + sum(self._l2_used.values()) + self._l3_used
+        return (
+            sum(self._l1_used.values())
+            + sum(self._l2_used.values())
+            + self._l3_used
+            + sum(self._replica_l1_used.values())
+            + sum(self._replica_l2_used.values())
+        )
 
     @property
     def free_bytes(self) -> int:
@@ -258,9 +348,9 @@ class KVCacheManager:
 
     def tier_used_bytes(self, tier: KVTier) -> int:
         if tier == KVTier.L1:
-            return sum(self._l1_used.values())
+            return sum(self._l1_used.values()) + sum(self._replica_l1_used.values())
         if tier == KVTier.L2:
-            return sum(self._l2_used.values())
+            return sum(self._l2_used.values()) + sum(self._replica_l2_used.values())
         return self._l3_used
 
     def tier_capacity_bytes(self, tier: KVTier) -> int:
@@ -278,10 +368,12 @@ class KVCacheManager:
         return max(threshold, 0)
 
     def _l1_capacity_threshold(self) -> int:
-        return self._effective_capacity(self.l1_bank_capacity_bytes)
+        canonical_cap = int(self.l1_bank_capacity_bytes * max(0.0, 1.0 - self.replica_reserve_ratio_l1))
+        return self._effective_capacity(canonical_cap)
 
     def _l2_capacity_threshold(self) -> int:
-        return self._effective_capacity(self.l2_die_capacity_bytes)
+        canonical_cap = int(self.l2_die_capacity_bytes * max(0.0, 1.0 - self.replica_reserve_ratio_l2))
+        return self._effective_capacity(canonical_cap)
 
     def _l3_capacity_threshold(self) -> int:
         return self._effective_capacity(self.l3_capacity_bytes)
@@ -307,6 +399,158 @@ class KVCacheManager:
 
     def has(self, hash_id: int) -> bool:
         return hash_id in self._locations
+
+    def _category_key_from_meta(self, meta: KVBlockMetadata) -> Tuple[str, str]:
+        return (str(meta.request_type or ""), str(meta.turn_class or "single"))
+
+    def _category_key_from_context(self, context: KVRequestContext) -> Tuple[str, str]:
+        return (str(context.request_type or ""), str(context.turn_class or "single"))
+
+    def _category_stats_for(self, key: Tuple[str, str]) -> KVCategoryStats:
+        if key not in self._category_stats:
+            self._category_stats[key] = KVCategoryStats(reuse_gap_ema_s=self._global_reuse_gap_ema_s)
+        return self._category_stats[key]
+
+    def _movement_cost_reference_s(self) -> float:
+        if self.kv_bytes_per_block <= 0:
+            return 1.0
+        return max(self.kv_bytes_per_block / max(self.pcie_bw_bps, 1.0), 1e-9)
+
+    def _set_request_context(
+        self,
+        target_card: Optional[int],
+        target_die: Optional[int],
+        sim_time: float = 0.0,
+        chat_id: Optional[int] = None,
+        request_type: str = "",
+        turn_class: str = "single",
+    ) -> None:
+        self._current_request_context = KVRequestContext(
+            chat_id=chat_id,
+            request_type=str(request_type or ""),
+            turn_class=str(turn_class or "single"),
+            sim_time=float(sim_time or 0.0),
+            target_card=target_card,
+            target_die=target_die,
+        )
+
+    def _bootstrap_ttl_s(self, request_type: str, turn_class: str) -> float:
+        stats = self._category_stats.get((str(request_type or ""), str(turn_class or "single")))
+        base = stats.reuse_gap_ema_s if stats is not None else self._global_reuse_gap_ema_s
+        return max(base * float(self.aware_policy.get("TTL_SAFETY_FACTOR", 1.0)), 1e-6)
+
+    def _ensure_metadata(self, hash_id: int) -> KVBlockMetadata:
+        if hash_id not in self._metadata:
+            ctx = self._current_request_context
+            meta = KVBlockMetadata(
+                owner_chat_id=ctx.chat_id,
+                request_type=ctx.request_type,
+                turn_class=ctx.turn_class,
+                insert_time_s=ctx.sim_time,
+                last_access_time_s=ctx.sim_time,
+                predicted_ttl_s=self._bootstrap_ttl_s(ctx.request_type, ctx.turn_class),
+                last_home_card=ctx.target_card,
+                last_home_die=ctx.target_die,
+            )
+            if ctx.target_card is not None:
+                meta.distinct_cards_seen.add(int(ctx.target_card))
+            self._metadata[hash_id] = meta
+        return self._metadata[hash_id]
+
+    def _score_block(self, hash_id: int, source: Optional[KVLocation] = None) -> float:
+        if self.eviction_policy != "aware":
+            return 0.0
+        meta = self._metadata.get(hash_id)
+        if meta is None:
+            return -1.0
+        ctx = self._current_request_context
+        age_s = max(0.0, float(ctx.sim_time) - float(meta.last_access_time_s))
+        ttl_s = max(float(meta.predicted_ttl_s), 1e-6)
+        ttl_survival = math.exp(-age_s / ttl_s)
+        hotness_cap = max(float(self.aware_policy.get("HOTNESS_CAP", 8)), 1.0)
+        hotness = min(float(meta.reuse_count), hotness_cap) / hotness_cap
+        distinct_cards = min(len(meta.distinct_cards_seen), self.num_cards) / max(self.num_cards, 1)
+        locality = 1.0 if ctx.chat_id is not None and meta.owner_chat_id == ctx.chat_id else 0.0
+        single_turn = 1.0 if meta.turn_class == "single" and bool(self.aware_policy.get("SINGLE_TURN_BIAS", True)) else 0.0
+        expected_cost = 0.0
+        if source is not None and ctx.target_card is not None and ctx.target_die is not None:
+            expected_cost = self._movement_time_s(
+                source,
+                KVLocation(KVTier.L1, ctx.target_card, ctx.target_die, self.bank_for_hash(hash_id)),
+            ) / self._movement_cost_reference_s()
+        return (
+            float(self.aware_policy.get("RECENCY_WEIGHT", 1.0)) * ttl_survival
+            + float(self.aware_policy.get("REUSE_WEIGHT", 1.0)) * (0.5 * hotness + 0.5 * distinct_cards)
+            + float(self.aware_policy.get("LOCALITY_WEIGHT", 1.0)) * (locality + 0.5 * single_turn)
+            + float(self.aware_policy.get("COST_WEIGHT", 1.0)) * expected_cost
+        )
+
+    def _touch_metadata(self, hash_id: int, source: Optional[KVLocation], is_hit: bool) -> None:
+        ctx = self._current_request_context
+        meta = self._ensure_metadata(hash_id)
+        age_s = max(0.0, float(ctx.sim_time) - float(meta.last_access_time_s))
+        category_stats = self._category_stats_for(self._category_key_from_context(ctx))
+        category_stats.accesses += 1
+        if is_hit:
+            category_stats.hits += 1
+        if is_hit and age_s > 0.0:
+            alpha = 0.2
+            category_stats.reuse_gap_ema_s = (
+                (1.0 - alpha) * category_stats.reuse_gap_ema_s + alpha * age_s
+            )
+            self._global_reuse_gap_ema_s = (
+                (1.0 - alpha) * self._global_reuse_gap_ema_s + alpha * age_s
+            )
+            meta.last_reuse_gap_s = age_s
+            meta.predicted_ttl_s = max(
+                category_stats.reuse_gap_ema_s * float(self.aware_policy.get("TTL_SAFETY_FACTOR", 1.0)),
+                1e-6,
+            )
+            meta.reuse_count += 1
+        elif meta.predicted_ttl_s <= 0.0:
+            meta.predicted_ttl_s = self._bootstrap_ttl_s(ctx.request_type, ctx.turn_class)
+        meta.owner_chat_id = ctx.chat_id
+        meta.request_type = ctx.request_type
+        meta.turn_class = ctx.turn_class
+        meta.last_access_time_s = float(ctx.sim_time)
+        meta.last_home_card = ctx.target_card
+        meta.last_home_die = ctx.target_die
+        if ctx.target_card is not None:
+            meta.distinct_cards_seen.add(int(ctx.target_card))
+        if is_hit and source is not None and ctx.target_card is not None and (
+            source.card is None or source.card != ctx.target_card
+        ):
+            meta.remote_hit_count += 1
+
+    def _record_hit_classification(self, result: KVAccessResult, hash_id: int) -> None:
+        meta = self._ensure_metadata(hash_id)
+        ctx = self._current_request_context
+        if ctx.chat_id is not None and meta.owner_chat_id == ctx.chat_id:
+            self.stats.same_chat_hits += 1
+            result.same_chat_hit = 1
+        else:
+            self.stats.cross_chat_hits += 1
+            result.cross_chat_hit = 1
+        if meta.turn_class == "single":
+            self.stats.single_turn_hits += 1
+            result.single_turn_hit = 1
+        else:
+            self.stats.multi_turn_hits += 1
+            result.multi_turn_hit = 1
+
+    def _replica_location_for_card(self, hash_id: int, card: int, tier_name: str, preferred_die: Optional[int] = None) -> Optional[KVLocation]:
+        tier_name = str(tier_name or "AUTO").upper()
+        if tier_name == "L1":
+            if not self.l1_die_ids:
+                return None
+            die = preferred_die if preferred_die in self.l1_die_ids else self.l1_die_ids[0]
+            return KVLocation(KVTier.L1, card, die, self.bank_for_hash(hash_id))
+        if tier_name == "L2":
+            if not self.l2_die_ids:
+                return None
+            die = preferred_die if preferred_die in self.l2_die_ids else self.l2_die_ids[0]
+            return KVLocation(KVTier.L2, card, die, None)
+        return None
 
     def _movement_time_s(self, src: KVLocation, dst: KVLocation) -> float:
         bytes_size = self.kv_bytes_per_block
@@ -448,15 +692,163 @@ class KVCacheManager:
         if cap < self.kv_bytes_per_block:
             return False
         while self._l3_used + self.kv_bytes_per_block > cap:
-            victim_hash, _ = self._l3.popitem(last=False)
+            victim_hash = self._select_victim_hash(
+                self._l3,
+                lambda h: KVLocation(KVTier.L3, None, None, None),
+            )
+            if victim_hash is None:
+                break
+            self._l3.pop(victim_hash, None)
             self._locations.pop(victim_hash, None)
             self._l3_used -= self.kv_bytes_per_block
             self.stats.evictions += 1
             self.stats.l3_drops += 1
+        if self._l3_used + self.kv_bytes_per_block > cap:
+            return False
         self._l3[hash_id] = True
         self._l3_used += self.kv_bytes_per_block
         self._locations[hash_id] = KVLocation(KVTier.L3, None, None, None)
         return True
+
+    def _select_victim_hash(self, entries: OrderedDict, location_factory) -> Optional[int]:
+        if not entries:
+            return None
+        if self.eviction_policy != "aware":
+            victim_hash = next(iter(entries.keys()))
+            return victim_hash
+        victim_hash = None
+        victim_score = None
+        for hash_id in entries.keys():
+            score = self._score_block(hash_id, location_factory(hash_id))
+            if victim_score is None or score < victim_score:
+                victim_hash = hash_id
+                victim_score = score
+        return victim_hash
+
+    def _replica_capacity_threshold(self, tier: KVTier) -> int:
+        if tier == KVTier.L1:
+            return self._effective_capacity(self._l1_replica_capacity_per_card_bytes)
+        if tier == KVTier.L2:
+            return self._effective_capacity(self._l2_replica_capacity_per_card_bytes)
+        return 0
+
+    def _replica_pool_for(self, tier: KVTier, card: int):
+        if tier == KVTier.L1:
+            return self._replica_l1_cards[card], self._replica_l1_used, self._l1_replica_capacity_per_card_bytes
+        return self._replica_l2_cards[card], self._replica_l2_used, self._l2_replica_capacity_per_card_bytes
+
+    def _replica_has_local(self, hash_id: int, card: Optional[int]) -> Optional[KVLocation]:
+        if card is None:
+            return None
+        location = self._replica_locations.get(hash_id, {}).get(int(card))
+        return location
+
+    def _remove_replica(self, hash_id: int, card: int) -> None:
+        location = self._replica_locations.get(hash_id, {}).pop(card, None)
+        if location is None:
+            return
+        if location.tier == KVTier.L1:
+            self._replica_l1_cards[card].pop(hash_id, None)
+            self._replica_l1_used[card] = max(0, self._replica_l1_used[card] - self.kv_bytes_per_block)
+        elif location.tier == KVTier.L2:
+            self._replica_l2_cards[card].pop(hash_id, None)
+            self._replica_l2_used[card] = max(0, self._replica_l2_used[card] - self.kv_bytes_per_block)
+        if not self._replica_locations.get(hash_id):
+            self._replica_locations.pop(hash_id, None)
+
+    def _ensure_replica_space(self, tier: KVTier, card: int) -> bool:
+        entries, used_map, _ = self._replica_pool_for(tier, card)
+        cap = self._replica_capacity_threshold(tier)
+        if cap < self.kv_bytes_per_block:
+            return False
+        while used_map[card] + self.kv_bytes_per_block > cap:
+            victim_hash = self._select_victim_hash(entries, lambda h: self._replica_locations.get(h, {}).get(card))
+            if victim_hash is None:
+                break
+            self._remove_replica(victim_hash, card)
+            self.stats.replica_evictions += 1
+        return used_map[card] + self.kv_bytes_per_block <= cap
+
+    def _record_replica_fanout(self, result: KVAccessResult, src: KVLocation, dst: KVLocation) -> None:
+        time_s = self._movement_time_s(src, dst)
+        result.replica_fanout_blocks += 1
+        result.replica_fanout_bytes += self.kv_bytes_per_block
+        result.replica_fanout_time_s += time_s
+        self.stats.replica_fanout_blocks += 1
+
+    def _insert_replica(self, hash_id: int, location: KVLocation) -> bool:
+        if location.card is None:
+            return False
+        tier = location.tier
+        card = int(location.card)
+        if self._replica_locations.get(hash_id, {}).get(card) is not None:
+            return True
+        if not self._ensure_replica_space(tier, card):
+            return False
+        if tier == KVTier.L1:
+            self._replica_l1_cards[card][hash_id] = location
+            self._replica_l1_used[card] += self.kv_bytes_per_block
+        else:
+            self._replica_l2_cards[card][hash_id] = location
+            self._replica_l2_used[card] += self.kv_bytes_per_block
+        self._replica_locations.setdefault(hash_id, {})[card] = location
+        return True
+
+    def _record_replica_hit(self, hash_id: int, location: KVLocation, result: KVAccessResult) -> None:
+        self.stats.hits += 1
+        self.stats.replica_hits += 1
+        result.is_hit = True
+        result.hit_tier = location.tier
+        result.replica_hit = 1
+        self._record_hit_classification(result, hash_id)
+        if location.tier == KVTier.L1:
+            self.stats.l1_hits += 1
+            self.stats.replica_l1_hits += 1
+            result.replica_l1_hit = 1
+            self._replica_l1_cards[int(location.card)].move_to_end(hash_id)
+        else:
+            self.stats.l2_hits += 1
+            self.stats.replica_l2_hits += 1
+            result.replica_l2_hit = 1
+            self._replica_l2_cards[int(location.card)].move_to_end(hash_id)
+            target = KVLocation(KVTier.L1, self._current_request_context.target_card, self._current_request_context.target_die, self.bank_for_hash(hash_id))
+            self._record_transfer(result, location, target, is_callback=True)
+            if location.card is not None and self._current_request_context.target_card is not None and location.card != self._current_request_context.target_card:
+                self.stats.avoided_cross_card_callbacks += 1
+                result.avoided_cross_card_callback = 1
+        self._touch_metadata(hash_id, location, is_hit=True)
+
+    def _maybe_broadcast_replicas(self, hash_id: int, canonical_location: Optional[KVLocation], result: KVAccessResult) -> None:
+        if self.placement_policy != "hotset_broadcast":
+            return
+        meta = self._metadata.get(hash_id)
+        if meta is None:
+            return
+        min_cards = int(self.aware_policy.get("REPLICA_MIN_DISTINCT_CARDS", 3))
+        min_remote_hits = int(self.aware_policy.get("REPLICA_MIN_REMOTE_HITS", 8))
+        score_threshold = float(self.aware_policy.get("REPLICA_SCORE_THRESHOLD", 0.0))
+        score = self._score_block(hash_id, canonical_location)
+        if len(meta.distinct_cards_seen) < min_cards or meta.remote_hit_count < min_remote_hits or score < score_threshold:
+            return
+        tier_name = self.replica_tier
+        if tier_name == "AUTO":
+            tier_name = "L2" if self._l2_replica_capacity_per_card_bytes >= self.kv_bytes_per_block and self.l2_die_ids else "L1"
+        replica_tier = KVTier.L2 if tier_name == "L2" else KVTier.L1
+        promoted = False
+        for card in range(self.num_cards):
+            if canonical_location is not None and canonical_location.card == card:
+                continue
+            if self._replica_locations.get(hash_id, {}).get(card) is not None:
+                continue
+            location = self._replica_location_for_card(hash_id, card, tier_name, preferred_die=self._current_request_context.target_die)
+            if location is None:
+                continue
+            if self._insert_replica(hash_id, location):
+                promoted = True
+                if canonical_location is not None:
+                    self._record_replica_fanout(result, canonical_location, location)
+        if promoted:
+            self.stats.broadcast_promotions += 1
 
     def _candidate_sort_key(self, source: KVLocation, candidate: KVLocation) -> Tuple[float, int, int, int, int]:
         score = self._movement_time_s(source, candidate) + self._movement_time_s(candidate, source)
@@ -580,7 +972,13 @@ class KVCacheManager:
         entries = self._l1_banks[bank_key]
         if not entries:
             return False
-        victim_hash, _ = entries.popitem(last=False)
+        victim_hash = self._select_victim_hash(
+            entries,
+            lambda h: KVLocation(KVTier.L1, bank_key[0], bank_key[1], bank_key[2]),
+        )
+        if victim_hash is None:
+            return False
+        entries.pop(victim_hash, None)
         self._l1_used[bank_key] -= self.kv_bytes_per_block
         source = KVLocation(KVTier.L1, bank_key[0], bank_key[1], bank_key[2])
         self._locations.pop(victim_hash, None)
@@ -591,7 +989,13 @@ class KVCacheManager:
         entries = self._l2_dies[die_key]
         if not entries:
             return False
-        victim_hash, _ = entries.popitem(last=False)
+        victim_hash = self._select_victim_hash(
+            entries,
+            lambda h: KVLocation(KVTier.L2, die_key[0], die_key[1], None),
+        )
+        if victim_hash is None:
+            return False
+        entries.pop(victim_hash, None)
         self._l2_used[die_key] -= self.kv_bytes_per_block
         source = KVLocation(KVTier.L2, die_key[0], die_key[1], None)
         self._locations.pop(victim_hash, None)
@@ -626,20 +1030,66 @@ class KVCacheManager:
         self._record_move(source, KVLocation(KVTier.L1, target_card, target_die, target_bank_key[2]), result, is_callback=True)
         return True
 
-    def access(self, hash_id: int, target_card: Optional[int] = None, target_die: Optional[int] = None) -> KVAccessResult:
+    def access(
+        self,
+        hash_id: int,
+        target_card: Optional[int] = None,
+        target_die: Optional[int] = None,
+        sim_time: float = 0.0,
+        chat_id: Optional[int] = None,
+        request_type: str = "",
+        turn_class: str = "single",
+    ) -> KVAccessResult:
         result = KVAccessResult()
         location = self.locate(hash_id)
 
         if target_card is None or target_die is None:
             target_card, target_die = self.assign_request_home(hash_id)
+        self._set_request_context(
+            target_card=target_card,
+            target_die=target_die,
+            sim_time=sim_time,
+            chat_id=chat_id,
+            request_type=request_type,
+            turn_class=turn_class,
+        )
+
+        local_replica = self._replica_has_local(hash_id, target_card)
+        canonical_local_l1 = (
+            location is not None
+            and location.tier == KVTier.L1
+            and location.card == target_card
+            and location.die == target_die
+        )
+
+        if local_replica is not None and not canonical_local_l1:
+            self._record_replica_hit(hash_id, local_replica, result)
+            if location is not None and location.card is not None and target_card is not None and location.card != target_card:
+                self.stats.avoided_cross_card_callbacks += 1
+                result.avoided_cross_card_callback = 1
+            return result
 
         if location is None:
             self.stats.misses += 1
             target_bank_key = (target_card, target_die, self.bank_for_hash(hash_id))
+            inserted = False
             if self._valid_l1_bank_key(*target_bank_key) and self._ensure_l1_bank_space(target_bank_key, result):
                 self._insert_l1_bank(hash_id, target_bank_key)
                 self.stats.inserts += 1
                 result.inserted = True
+                inserted = True
+            elif self._valid_l2_die_key(target_card, target_die) and self._ensure_l2_die_space((target_card, target_die), result):
+                self._insert_l2_die(hash_id, (target_card, target_die))
+                self.stats.inserts += 1
+                result.inserted = True
+                inserted = True
+            elif self._insert_l3(hash_id):
+                self.stats.inserts += 1
+                result.inserted = True
+                inserted = True
+            self._touch_metadata(hash_id, None, is_hit=False)
+            if inserted:
+                self._maybe_broadcast_replicas(hash_id, self.locate(hash_id), result)
             return result
 
         if location.tier == KVTier.L1:
@@ -647,8 +1097,16 @@ class KVCacheManager:
             self.stats.l1_hits += 1
             result.is_hit = True
             result.hit_tier = KVTier.L1
+            self._record_hit_classification(result, hash_id)
             bank_key = (location.card, location.die, location.bank)
-            self._l1_banks[bank_key].move_to_end(hash_id)
+            if location.card == target_card and location.die == target_die:
+                self._l1_banks[bank_key].move_to_end(hash_id)
+            else:
+                self._remove(hash_id, location)
+                if not self._callback_to_l1(hash_id, location, target_card, target_die, result):
+                    self._insert_l1_bank(hash_id, bank_key)
+            self._touch_metadata(hash_id, location, is_hit=True)
+            self._maybe_broadcast_replicas(hash_id, self.locate(hash_id), result)
             return result
 
         if location.tier == KVTier.L2:
@@ -656,18 +1114,24 @@ class KVCacheManager:
             self.stats.l2_hits += 1
             result.is_hit = True
             result.hit_tier = KVTier.L2
+            self._record_hit_classification(result, hash_id)
             self._remove(hash_id, location)
             if not self._callback_to_l1(hash_id, location, target_card, target_die, result):
                 self._insert_l2_die(hash_id, (location.card, location.die))
+            self._touch_metadata(hash_id, location, is_hit=True)
+            self._maybe_broadcast_replicas(hash_id, self.locate(hash_id), result)
             return result
 
         self.stats.hits += 1
         self.stats.l3_hits += 1
         result.is_hit = True
         result.hit_tier = KVTier.L3
+        self._record_hit_classification(result, hash_id)
         self._remove(hash_id, location)
         if not self._callback_to_l1(hash_id, location, target_card, target_die, result):
             self._insert_l3(hash_id)
+        self._touch_metadata(hash_id, location, is_hit=True)
+        self._maybe_broadcast_replicas(hash_id, self.locate(hash_id), result)
         return result
 
     def touch(self, hash_id: int) -> bool:
@@ -741,6 +1205,8 @@ class KVCacheManager:
         l1_num_blocks = sum(len(entries) for entries in self._l1_banks.values())
         l2_num_blocks = sum(len(entries) for entries in self._l2_dies.values())
         l3_num_blocks = len(self._l3)
+        replica_l1_num_blocks = sum(len(entries) for entries in self._replica_l1_cards.values())
+        replica_l2_num_blocks = sum(len(entries) for entries in self._replica_l2_cards.values())
         return {
             "capacity_bytes": self.capacity_bytes,
             "used_bytes": self.used_bytes,
@@ -749,16 +1215,22 @@ class KVCacheManager:
             "l1_num_blocks": l1_num_blocks,
             "l2_num_blocks": l2_num_blocks,
             "l3_num_blocks": l3_num_blocks,
+            "replica_l1_num_blocks": replica_l1_num_blocks,
+            "replica_l2_num_blocks": replica_l2_num_blocks,
             "l1_capacity_bytes": self._l1_total_capacity_bytes,
             "l2_capacity_bytes": self._l2_total_capacity_bytes,
             "l3_capacity_bytes": self.l3_capacity_bytes,
             "l1_effective_capacity_bytes": self._effective_capacity(self._l1_total_capacity_bytes),
             "l2_effective_capacity_bytes": self._effective_capacity(self._l2_total_capacity_bytes),
             "l3_effective_capacity_bytes": self._effective_capacity(self.l3_capacity_bytes),
+            "replica_l1_capacity_per_card_bytes": self._l1_replica_capacity_per_card_bytes,
+            "replica_l2_capacity_per_card_bytes": self._l2_replica_capacity_per_card_bytes,
             "spare_ratio": self.spare_ratio,
             "l1_used_bytes": sum(self._l1_used.values()),
             "l2_used_bytes": sum(self._l2_used.values()),
             "l3_used_bytes": self._l3_used,
+            "replica_l1_used_bytes": sum(self._replica_l1_used.values()),
+            "replica_l2_used_bytes": sum(self._replica_l2_used.values()),
             "hits": self.stats.hits,
             "l1_hits": self.stats.l1_hits,
             "l2_hits": self.stats.l2_hits,
@@ -780,6 +1252,22 @@ class KVCacheManager:
             "callback_cross_die": self.stats.callback_cross_die,
             "callback_cross_card": self.stats.callback_cross_card,
             "callback_l3_to_l1": self.stats.callback_l3_to_l1,
+            "same_chat_hits": self.stats.same_chat_hits,
+            "cross_chat_hits": self.stats.cross_chat_hits,
+            "single_turn_hits": self.stats.single_turn_hits,
+            "multi_turn_hits": self.stats.multi_turn_hits,
+            "replica_hits": self.stats.replica_hits,
+            "replica_l1_hits": self.stats.replica_l1_hits,
+            "replica_l2_hits": self.stats.replica_l2_hits,
+            "replica_fanout_blocks": self.stats.replica_fanout_blocks,
+            "replica_evictions": self.stats.replica_evictions,
+            "broadcast_promotions": self.stats.broadcast_promotions,
+            "avoided_cross_card_callbacks": self.stats.avoided_cross_card_callbacks,
+            "eviction_policy": self.eviction_policy,
+            "placement_policy": self.placement_policy,
+            "replica_tier": self.replica_tier,
+            "replica_reserve_ratio_l1": self.replica_reserve_ratio_l1,
+            "replica_reserve_ratio_l2": self.replica_reserve_ratio_l2,
             "banks_per_die": self.banks_per_die,
             "num_die_packages_per_card": self.num_die_packages_per_card,
             "l1_bank_capacity_bytes": self.l1_bank_capacity_bytes,

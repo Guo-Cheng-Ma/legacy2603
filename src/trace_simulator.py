@@ -4,7 +4,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from .continuous_scheduler import ContinuousScheduler
-from .config import get_hetero_kv_capacities, load_hetero_kv_arch_config, get_hetero_transfer_bandwidths
+from .config import (
+    get_hetero_kv_capacities,
+    get_hetero_transfer_bandwidths,
+    load_hetero_kv_arch_config,
+    resolve_kv_policy_config,
+)
 from .kv_cache import KVCacheManager
 from .request_state import RequestState
 from .static_batch_scheduler import StaticBatchScheduler
@@ -69,6 +74,7 @@ def _build_kv_cache(system, kv_arch_cfg: Dict) -> Tuple[KVCacheManager, Dict]:
             "dma_bw_bps": bw_cfg["dma_bw_bps"],
             "pcie_bw_bps": bw_cfg["pcie_bw_bps"],
         },
+        policy=kv_arch_cfg,
     )
     return cache, tier_caps
 
@@ -222,7 +228,11 @@ def run_trace_simulation(
                 timestamp_scaling,
             )
         )
-    kv_arch_cfg = load_hetero_kv_arch_config(kv_arch_config)
+    kv_arch_cfg = resolve_kv_policy_config(
+        model_name=system.model.name,
+        trace_file=trace_file,
+        hetero_kv_arch=kv_arch_config,
+    )
     bw_cfg = get_hetero_transfer_bandwidths(kv_arch_cfg)
     requests = load_request_states(trace_file, timestamp_scale=timestamp_scaling)
     if trace_debug:
@@ -335,6 +345,14 @@ def run_trace_simulation(
             'callback_same_die_blocks': req.callback_same_die_blocks,
             'callback_cross_die_blocks': req.callback_cross_die_blocks,
             'callback_cross_card_blocks': req.callback_cross_card_blocks,
+            'same_chat_hit_blocks': req.same_chat_hit_blocks,
+            'cross_chat_hit_blocks': req.cross_chat_hit_blocks,
+            'single_turn_hit_blocks': req.single_turn_hit_blocks,
+            'multi_turn_hit_blocks': req.multi_turn_hit_blocks,
+            'replica_hit_blocks': req.replica_hit_blocks,
+            'replica_l1_hit_blocks': req.replica_l1_hit_blocks,
+            'replica_l2_hit_blocks': req.replica_l2_hit_blocks,
+            'avoided_cross_card_blocks': req.avoided_cross_card_blocks,
         })
 
     summary = _summarize_requests(completed, snapshot.sim_time)
@@ -356,6 +374,12 @@ def run_trace_simulation(
     summary['timestamp_scaling'] = float(timestamp_scaling)
     summary['kv_capacity_mode'] = "hetero_3tier"
     summary['kv_arch_config'] = kv_arch_config
+    summary['trace_family'] = kv_arch_cfg.get("TRACE_FAMILY", "")
+    summary['eviction_policy_cfg'] = kv_arch_cfg.get("EVICTION_POLICY", "lru")
+    summary['placement_policy_cfg'] = kv_arch_cfg.get("PLACEMENT_POLICY", "all_unique")
+    summary['replica_tier_cfg'] = kv_arch_cfg.get("REPLICA_TIER", "AUTO")
+    summary['replica_reserve_ratio_l1_cfg'] = kv_arch_cfg.get("REPLICA_RESERVE_RATIO_L1", 0.0)
+    summary['replica_reserve_ratio_l2_cfg'] = kv_arch_cfg.get("REPLICA_RESERVE_RATIO_L2", 0.0)
     summary['num_cards_cfg'] = kv_arch_cfg["NUM_CARDS"]
     summary['num_die_packages_per_card_cfg'] = kv_caps["num_die_packages_per_card"]
     summary['banks_per_die_cfg'] = kv_caps["banks_per_die"]
@@ -376,6 +400,11 @@ def run_trace_simulation(
     summary['l3_kv_capacity_bytes_cfg'] = kv_caps["l3_kv_bytes"]
     summary['kv_bytes_per_block'] = kv_cache.kv_bytes_per_block
     summary['resident_blocks'] = summary.get('num_blocks', 0)
+    summary['resident_blocks_including_replicas'] = (
+        summary.get('num_blocks', 0)
+        + summary.get('replica_l1_num_blocks', 0)
+        + summary.get('replica_l2_num_blocks', 0)
+    )
     summary['kv_cache_capacity_bytes'] = summary.get('capacity_bytes', 0)
     summary['kv_cache_capacity_gb'] = summary['kv_cache_capacity_bytes'] / (1024.0 * 1024.0 * 1024.0)
     summary['kv_cache_used_gb'] = summary.get('used_bytes', 0) / (1024.0 * 1024.0 * 1024.0)
@@ -390,6 +419,12 @@ def run_trace_simulation(
     summary['l1_hit_rate'] = (summary.get('l1_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
     summary['l2_hit_rate'] = (summary.get('l2_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
     summary['l3_hit_rate'] = (summary.get('l3_hits', 0) / total_tier_hits) if total_tier_hits > 0 else 0.0
+    summary['same_chat_hit_rate'] = (
+        summary.get('same_chat_hits', 0) / total_tier_hits
+    ) if total_tier_hits > 0 else 0.0
+    summary['cross_chat_hit_rate'] = (
+        summary.get('cross_chat_hits', 0) / total_tier_hits
+    ) if total_tier_hits > 0 else 0.0
     summary['l1_used_ratio'] = (
         summary.get('l1_used_bytes', 0) / summary.get('l1_capacity_bytes', 1)
     ) if summary.get('l1_capacity_bytes', 0) > 0 else 0.0
@@ -408,6 +443,10 @@ def run_trace_simulation(
     summary['pcie_time_s'] = summary.get('pcie_time_s', 0.0)
     summary['migration_time_s'] = summary.get('migration_time_s', 0.0)
     summary['migration_energy_nj'] = summary.get('migration_energy_nj', 0.0)
+    summary['replica_fanout_time_s'] = summary.get('replica_fanout_time_s', 0.0)
+    summary['replica_fanout_bytes'] = summary.get('replica_fanout_bytes', 0)
+    summary['replica_fanout_blocks'] = summary.get('replica_fanout_blocks', 0)
+    summary['avoided_cross_card_callbacks'] = summary.get('avoided_cross_card_callbacks', 0)
     summary['Lin'] = summary.get('avg_input_tokens', 0.0)
     summary['Lout'] = summary.get('avg_output_tokens', 0.0)
     summary['bs'] = summary.get('max_batch_size', 0)
@@ -506,8 +545,14 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'decode_padded_tokens',
         'prefill_chunk_tokens',
         'timestamp_scaling',
+        'trace_family',
         'kv_capacity_mode',
         'kv_arch_config',
+        'eviction_policy_cfg',
+        'placement_policy_cfg',
+        'replica_tier_cfg',
+        'replica_reserve_ratio_l1_cfg',
+        'replica_reserve_ratio_l2_cfg',
         'num_cards_cfg',
         'num_die_packages_per_card_cfg',
         'banks_per_die_cfg',
@@ -573,24 +618,44 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'kv_hit_rate',
         'kv_evictions',
         'resident_blocks',
+        'resident_blocks_including_replicas',
         'l1_num_blocks',
         'l2_num_blocks',
         'l3_num_blocks',
+        'replica_l1_num_blocks',
+        'replica_l2_num_blocks',
         'l1_hits',
         'l2_hits',
         'l3_hits',
+        'same_chat_hits',
+        'cross_chat_hits',
+        'single_turn_hits',
+        'multi_turn_hits',
+        'replica_hits',
+        'replica_l1_hits',
+        'replica_l2_hits',
         'l1_hit_rate',
         'l2_hit_rate',
         'l3_hit_rate',
+        'same_chat_hit_rate',
+        'cross_chat_hit_rate',
         'l1_to_l2',
         'l2_to_l3',
         'l3_drops',
+        'replica_evictions',
+        'broadcast_promotions',
+        'replica_fanout_blocks',
+        'avoided_cross_card_callbacks',
         'l1_used_bytes',
         'l2_used_bytes',
         'l3_used_bytes',
+        'replica_l1_used_bytes',
+        'replica_l2_used_bytes',
         'l1_capacity_bytes',
         'l2_capacity_bytes',
         'l3_capacity_bytes',
+        'replica_l1_capacity_per_card_bytes',
+        'replica_l2_capacity_per_card_bytes',
         'l1_used_ratio',
         'l2_used_ratio',
         'l3_used_ratio',
@@ -610,6 +675,7 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'cross_die_time_s',
         'cross_card_time_s',
         'migration_time_s',
+        'replica_fanout_time_s',
         'callback_migration_time_s',
         'total_eviction_time_s',
         'charged_eviction_time_s',
@@ -637,6 +703,7 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'max_eviction_nvlink_active_domains',
         'max_eviction_pcie_active_domains',
         'migration_bytes',
+        'replica_fanout_bytes',
         'prefill_work_time_s',
         'decode_work_time_s',
         'prefill_steps',
@@ -721,6 +788,14 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'callback_same_die_blocks',
         'callback_cross_die_blocks',
         'callback_cross_card_blocks',
+        'same_chat_hit_blocks',
+        'cross_chat_hit_blocks',
+        'single_turn_hit_blocks',
+        'multi_turn_hit_blocks',
+        'replica_hit_blocks',
+        'replica_l1_hit_blocks',
+        'replica_l2_hit_blocks',
+        'avoided_cross_card_blocks',
     ]
     _write_jsonl_rows(requests_path, request_rows, request_cols)
 

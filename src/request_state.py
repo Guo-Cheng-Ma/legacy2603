@@ -55,6 +55,14 @@ class RequestState:
     callback_same_die_blocks: int = 0
     callback_cross_die_blocks: int = 0
     callback_cross_card_blocks: int = 0
+    same_chat_hit_blocks: int = 0
+    cross_chat_hit_blocks: int = 0
+    single_turn_hit_blocks: int = 0
+    multi_turn_hit_blocks: int = 0
+    replica_hit_blocks: int = 0
+    replica_l1_hit_blocks: int = 0
+    replica_l2_hit_blocks: int = 0
+    avoided_cross_card_blocks: int = 0
     home_card: Optional[int] = None
     home_die: Optional[int] = None
     enqueued_time: Optional[float] = None
@@ -82,6 +90,10 @@ class RequestState:
     @property
     def prompt_block_count(self) -> int:
         return len(self.trace.hash_ids)
+
+    @property
+    def turn_class(self) -> str:
+        return "single" if self.trace.turn <= 1 else "multi"
 
     @property
     def ttft(self) -> Optional[float]:
