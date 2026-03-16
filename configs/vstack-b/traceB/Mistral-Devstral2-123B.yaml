@@ -1,0 +1,41 @@
+system:
+  system: dgx-attacc
+  gpu: A100a
+  ngpu: 8
+
+pim:
+  pim: bank
+  num_pim_die: 5
+  die_type: vstack
+  compute_stack_l1: 4
+  capacity_stack_l2: 4
+  powerlimit: true
+  ffopt: true
+  pipeopt: true
+
+model:
+  model: Mistral-Devstral2-123B
+  word: 2
+
+workload:
+  mode: trace
+  lin: 2048
+  lout: 128
+  batch: 16
+
+trace:
+  trace_file: "llm-req-inputs/qwen_traceB_blksz_16.jsonl"
+  max_batch_size: 16
+  prefill_chunk_tokens: 128
+  trace_scheduler: continuous
+  timestamp_scaling: 6.0
+  trace_debug: false
+  trace_debug_interval: 100
+
+kv_arch:
+  num_cards: 8
+  host_kv_total_gb: 512
+  dma_bandwidth_gbps: 1676
+  pcie_bandwidth_gbps: 64
+  eviction_policy: lru
+  placement_policy: all_unique
