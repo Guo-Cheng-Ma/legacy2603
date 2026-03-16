@@ -47,7 +47,7 @@ timeline.csv                   # Step-by-step change log (append after each comm
 - Continuous: chunked prefill + per-token decode + immediate backfill.
 - Static: batch-at-a-time, decode runs `max(output_length)` steps, no backfill.
 - Global KV reuse by `hash_id` with 3-tier LRU (L1/L2/L3) and migration penalties.
-- Output: `results/<date>/<trace>/S-*.yaml` + `results/<date>/<trace>/R-*.jsonl`.
+- Output: `results/<date>/<family>/<trace>/S-*.yaml` + `results/<date>/<family>/<trace>/R-*.jsonl` when the input config is under `configs/<family>/<trace>/`; otherwise it falls back to `results/<date>/<trace>/...`.
 
 ## Key Constraints and Rules
 
@@ -83,7 +83,7 @@ For BA Ramulator cache warmup, match the same power mode:
 For each change step:
 
 1. **Edit**: Make targeted changes in `src/` or `main.py`.
-2. **Sync docs**: If the simulator's functionality, spec, outputs, or workflow changed, update `architecture_summary.md` and `AGENTS.md` in the same step before committing.
+2. **Sync docs**: If the simulator's functionality, spec, outputs, or workflow changed, update `workflow.md`, `architecture_summary.md`, and `AGENTS.md` in the same step before committing.
 3. **Validate**: Run unit test or full simulation:
    ```bash
    # Fixed mode smoke test
@@ -149,4 +149,4 @@ timestamp,step,status,files,build,notes
 2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added --timestamp-scaling...
 ```
 - Step IDs: C1, C2, ... (sequential)
-- Latest step: C56
+- Latest step: C60

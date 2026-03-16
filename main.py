@@ -81,12 +81,31 @@ def _trace_name(trace_file: str) -> str:
     return trace_stem
 
 
-def _trace_output_paths(trace_file: str, die_type: str, compute_stack_l1: int,
+def _result_subdirs(config_path: str, trace_file: str):
+    cfg_path = Path(str(config_path or ""))
+    cfg_parts_lower = [part.lower() for part in cfg_path.parts]
+    family = ""
+    trace_name = _trace_name(trace_file)
+
+    if "configs" in cfg_parts_lower:
+        cfg_idx = cfg_parts_lower.index("configs")
+        trailing = cfg_path.parts[cfg_idx + 1:]
+        if len(trailing) >= 2:
+            family = trailing[0]
+            trace_name = trailing[1]
+    return family, trace_name
+
+
+def _trace_output_paths(config_path: str, trace_file: str, die_type: str, compute_stack_l1: int,
                         model: str, ngpu: int):
     now = datetime.now()
     date_tag = now.strftime("%y%m%d")
     time_tag = now.strftime("%H%M%S")
-    trace_dir = Path("results") / date_tag / _trace_name(trace_file)
+    family, trace_name = _result_subdirs(config_path, trace_file)
+    trace_dir = Path("results") / date_tag
+    if family:
+        trace_dir = trace_dir / family
+    trace_dir = trace_dir / trace_name
     trace_dir.mkdir(parents=True, exist_ok=True)
 
     die_tag = str(die_type).lower()
@@ -201,6 +220,7 @@ def main():
         )
         summary = result['summary']
         summary_path, requests_path = _trace_output_paths(
+            config_path=cli_args.config,
             trace_file=args.trace_file,
             die_type=args.die_type,
             compute_stack_l1=args.compute_stack_l1,

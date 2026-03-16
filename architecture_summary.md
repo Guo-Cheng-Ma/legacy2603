@@ -201,6 +201,11 @@ These modules turn the fixed-shape estimator into a request-driven serving simul
 - `src/trace_simulator.py`
   - ties loader, cache, scheduler, and output writers together
 
+For matrix configs stored under `configs/<family>/<trace>/...`, trace outputs are now grouped under the mirrored result hierarchy:
+
+- `results/<date>/<family>/<trace>/S-*.yaml`
+- `results/<date>/<family>/<trace>/R-*.jsonl`
+
 This layer answers questions such as:
 
 - how arrival rate affects TTFT and latency

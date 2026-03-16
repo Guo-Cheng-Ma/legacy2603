@@ -293,12 +293,17 @@ Trace outputs are no longer written as flat `trace_summary_*.csv` and `trace_req
 Current output layout:
 
 ```text
-results/<YYMMDD>/<trace-name>/
+results/<YYMMDD>/<family>/<trace-name>/
   S-<die_type>-<compute_stack_l1>-<model>-<ngpu>gpu-<HHMMSS>.yaml
   R-<die_type>-<compute_stack_l1>-<model>-<ngpu>gpu-<HHMMSS>.jsonl
 ```
 
-`trace-name` is normalized from the input filename when it contains `traceA`, `traceB`, `coder`, or `thinking`.
+`family` and `trace-name` are inferred from the config path when it follows `configs/<family>/<trace>/...`.
+
+Fallback behavior:
+
+- if the config path is outside that hierarchy, output falls back to `results/<YYMMDD>/<trace-name>/...`
+- `trace-name` is normalized from the input filename when it contains `traceA`, `traceB`, `coder`, or `thinking`
 
 Summary YAML contains:
 
@@ -337,7 +342,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - confirm `output.csv` is produced
 4. Trace-mode smoke:
    - set `workload.mode: trace`
-   - confirm `results/<date>/<trace>/S-...yaml` and `R-...jsonl` are produced
+   - confirm `results/<date>/<family>/<trace>/S-...yaml` and `R-...jsonl` are produced for matrix configs under `configs/<family>/<trace>/...`
 5. Trace sanity checks:
    - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, and `trace_qps`
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
