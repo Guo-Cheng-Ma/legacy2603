@@ -899,26 +899,29 @@ def make_pim_config(pim_type: PIMType,
 
 def make_model_config(name, dtype):
     model_table = {}
-    model_table['GPT-175B'] = [96, 12288, 96, 128, 4, 1]
-    model_table['GPT-89B'] = [48, 12288, 96, 128, 4, 1]
-    model_table['GPT-13B'] = [40, 5120, 40, 128, 4, 1]
-    model_table['LLAMA-7B'] = [32, 4096, 32, 128, 8 / 3, 1]
-    model_table['LLAMA-65B'] = [80, 8192, 64, 128, 8 / 3, 1]
-    model_table['MT-76B'] = [60, 10240, 40, 128, 4, 1]
-    model_table['MT-146B'] = [80, 12288, 80, 128, 4, 1]
-    model_table['MT-310B'] = [96, 16384, 128, 128, 4, 1]
-    model_table['MT-530B'] = [105, 20480, 128, 160, 4, 1]
-    model_table['MT-1008B'] = [128, 25600, 160, 160, 4, 1]
-    model_table['OPT-66B'] = [64, 9216, 72, 128, 4, 1]
-    model_table["Qwen3-4B"] = [36, 2560, 32, 128, 3.8, 4]
-    model_table["Qwen3-32B"] = [64, 5120, 64, 128, 5.0, 8]
-    model_table["Mistral-Devstral2-123B"] = [80, 12288, 96, 128, 3.25, 16]
-    model_table["Llama-3.1-405B"] = [126, 16384, 128, 128, 3.25, 16]
+    # dhead is derived from hdim / num_heads at runtime so model metadata
+    # cannot drift away from the realized layer shape used by the simulator.
+    model_table['GPT-175B'] = [96, 12288, 96, 4, 1]
+    model_table['GPT-89B'] = [48, 12288, 96, 4, 1]
+    model_table['GPT-13B'] = [40, 5120, 40, 4, 1]
+    model_table['LLAMA-7B'] = [32, 4096, 32, 8 / 3, 1]
+    model_table['LLAMA-65B'] = [80, 8192, 64, 8 / 3, 1]
+    model_table['MT-76B'] = [60, 10240, 40, 4, 1]
+    model_table['MT-146B'] = [80, 12288, 80, 4, 1]
+    model_table['MT-310B'] = [96, 16384, 128, 4, 1]
+    model_table['MT-530B'] = [105, 20480, 128, 4, 1]
+    model_table['MT-1008B'] = [128, 25600, 160, 4, 1]
+    model_table['OPT-66B'] = [64, 9216, 72, 4, 1]
+    model_table["Qwen3-4B"] = [36, 2560, 32, 3.8, 4]
+    model_table["Qwen3-32B"] = [64, 5120, 64, 5.0, 8]
+    model_table["Mistral-Devstral2-123B"] = [80, 12288, 96, 3.25, 16]
+    model_table["Llama-3.1-405B"] = [126, 16384, 128, 3.25, 16]
     
 
     
 
-    ndec, hdim, nheads, dhead, ff_scale, gqa_size = model_table[name]
+    ndec, hdim, nheads, ff_scale, gqa_size = model_table[name]
+    dhead = int(hdim / nheads)
     config = {
         'name': name,
         'ndec': ndec,
