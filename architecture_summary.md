@@ -212,8 +212,9 @@ The frontend also has a lightweight post-processing layer under `tools/` for ana
   - scans trace summary YAMLs
   - deduplicates repeated runs by `(model, trace_family, mode)` while keeping the newest summary
   - exports a tidy CSV plus matplotlib figures under `figure/<yymmdd>-<hhmm>/` by default
-  - renders total energy breakdown, normalized throughput, normalized TTFT, and normalized latency
+  - renders energy breakdown normalized to `vstack-o`, normalized throughput, and TTFT/latency normalized to `vstack-o`
   - uses a broken y-axis for normalized plots when large outliers would otherwise flatten the smaller bars
+  - filters out the legacy `example` trace family from grouped analysis output
   - keeps empty slots visible when a `(model, trace_family, mode)` combination is missing
 
 This layer answers questions such as:

@@ -352,7 +352,9 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - run `python3 tools/plot_generation_results.py --results-root results`
    - confirm the deduplicated CSV and the six figure files are produced under `figure/<yymmdd>-<hhmm>/`
    - verify repeated `(model, trace_family, mode)` summaries keep only the newest run
-   - verify normalized TTFT/latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `attacc` baseline
+   - verify energy is normalized to `vstack-o` and the stacked components sum to the normalized total energy
+   - verify normalized TTFT/latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `vstack-o` baseline
+   - verify the legacy `example` trace family is excluded from the deduplicated CSV and figure labels
    - verify normalized plots use the broken-axis view when any plotted value exceeds `10`
    - verify missing modes remain labeled but draw no bar
 

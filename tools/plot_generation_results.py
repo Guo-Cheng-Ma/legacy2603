@@ -30,6 +30,10 @@ MODE_ORDER = ["attacc", "static", "uniform", "vstack-b", "vstack-o"]
 MODE_TICK_ROTATION = 33
 BREAK_THRESHOLD = 10.0
 BREAK_MARK_SIZE = 0.007
+THROUGHPUT_BASELINE_MODE = "attacc"
+ENERGY_BASELINE_MODE = "vstack-o"
+LATENCY_BASELINE_MODE = "vstack-o"
+SKIPPED_TRACE_FAMILIES = {"example"}
 MODE_COLORS = {
     "attacc": "#0b3954",
     "static": "#b85c38",
@@ -69,7 +73,6 @@ TRACE_ORDER_HINTS = {
     "traceb": 1,
     "coder": 2,
     "thinking": 3,
-    "example": 4,
 }
 NATURAL_RE = re.compile(r"(\d+)")
 DATE_TAG_RE = re.compile(r"^\d{6}$")
@@ -111,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         "--baseline-mode",
         default="attacc",
         choices=MODE_ORDER,
-        help="Mode used as the denominator for normalized metrics.",
+        help="Mode used as the denominator for normalized throughput metrics.",
     )
     parser.add_argument(
         "--format",
@@ -307,12 +310,14 @@ def discover_latest_summaries(results_root: Path) -> Tuple[List[Dict[str, object
     return list(latest.values()), dropped
 
 
-def build_complete_dataframe(
-    records: Iterable[Dict[str, object]], baseline_mode: str
-) -> pd.DataFrame:
+def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_baseline_mode: str) -> pd.DataFrame:
     record_df = pd.DataFrame(records)
     if record_df.empty:
         raise ValueError("no trace summary YAMLs were found under the results root")
+
+    record_df = record_df[~record_df["trace_family"].isin(SKIPPED_TRACE_FAMILIES)].copy()
+    if record_df.empty:
+        raise ValueError("no eligible trace summary YAMLs remained after filtering trace families")
 
     selected = {
         (row["model"], row["trace_family"], row["mode"]): row
@@ -332,18 +337,27 @@ def build_complete_dataframe(
 
     for model in ordered_models:
         for trace_family in traces_per_model[model]:
-            baseline = selected.get((model, trace_family, baseline_mode))
+            throughput_baseline = selected.get((model, trace_family, throughput_baseline_mode))
+            energy_baseline = selected.get((model, trace_family, ENERGY_BASELINE_MODE))
+            latency_baseline = selected.get((model, trace_family, LATENCY_BASELINE_MODE))
             baseline_queue = (
-                float(baseline["avg_queue_delay_s"])
-                if baseline is not None
+                float(latency_baseline["avg_queue_delay_s"])
+                if latency_baseline is not None
                 else math.nan
             )
-            baseline_ttft = float(baseline["avg_ttft_s"]) if baseline is not None else math.nan
+            baseline_ttft = (
+                float(latency_baseline["avg_ttft_s"]) if latency_baseline is not None else math.nan
+            )
             baseline_latency = (
-                float(baseline["avg_latency_s"]) if baseline is not None else math.nan
+                float(latency_baseline["avg_latency_s"]) if latency_baseline is not None else math.nan
             )
             baseline_throughput = (
-                float(baseline["throughput_tok_per_s"]) if baseline is not None else math.nan
+                float(throughput_baseline["throughput_tok_per_s"])
+                if throughput_baseline is not None
+                else math.nan
+            )
+            baseline_total_energy = (
+                float(energy_baseline["total_energy_nj"]) if energy_baseline is not None else math.nan
             )
             baseline_ttft_adjusted = safe_adjust(baseline_ttft, baseline_queue)
             baseline_latency_adjusted = safe_adjust(baseline_latency, baseline_queue)
@@ -413,6 +427,19 @@ def build_complete_dataframe(
                 row["latency_minus_queue_s"] = safe_adjust(
                     float(row["avg_latency_s"]), float(row["avg_queue_delay_s"])
                 )
+                row["energy_normalized"] = safe_ratio(
+                    float(row["total_energy_nj"]), baseline_total_energy
+                )
+                for key in (
+                    "total_dram_energy_nj",
+                    "total_l2_energy_nj",
+                    "total_l1_energy_nj",
+                    "total_reg_energy_nj",
+                    "total_alu_energy_nj",
+                    "total_comm_energy_nj",
+                ):
+                    normalized_key = key.replace("_nj", "_normalized")
+                    row[normalized_key] = safe_ratio(float(row[key]), baseline_total_energy)
                 row["throughput_normalized"] = safe_ratio(
                     float(row["throughput_tok_per_s"]), baseline_throughput
                 )
@@ -646,16 +673,10 @@ def plot_energy_breakdown(
 ) -> None:
     fig, ax = plt.subplots(figsize=figure_size_for_slots(len(plotted)))
     bottoms = np.zeros(len(plotted), dtype=float)
-    max_energy = 0.0
-    for column, label, color in ENERGY_COMPONENTS:
-        max_energy = max(
-            max_energy,
-            np.nanmax(plotted[column].to_numpy(dtype=float)) if not plotted[column].isna().all() else 0.0,
-        )
-    scale, unit = choose_energy_unit(max_energy)
 
     for column, label, color in ENERGY_COMPONENTS:
-        heights = plotted[column].to_numpy(dtype=float) / scale
+        normalized_column = column.replace("_nj", "_normalized")
+        heights = plotted[normalized_column].to_numpy(dtype=float)
         mask = np.isfinite(heights)
         ax.bar(
             plotted.loc[mask, "x"],
@@ -674,8 +695,9 @@ def plot_energy_breakdown(
         plotted,
         trace_groups,
         model_groups,
-        title="Generation Total Energy Breakdown",
-        ylabel=f"Energy ({unit})",
+        title="Generation Energy Breakdown (Normalized to VStack-O)",
+        ylabel="Normalized Energy",
+        show_reference_line=True,
     )
     ax.legend(loc="upper left", ncol=len(ENERGY_COMPONENTS), frameon=False, fontsize=9)
     fig.subplots_adjust(bottom=0.38, top=0.88, left=0.08, right=0.99)
@@ -760,6 +782,13 @@ def write_csv(df: pd.DataFrame, output_path: Path) -> None:
         "total_reg_energy_nj",
         "total_alu_energy_nj",
         "total_comm_energy_nj",
+        "energy_normalized",
+        "total_dram_energy_normalized",
+        "total_l2_energy_normalized",
+        "total_l1_energy_normalized",
+        "total_reg_energy_normalized",
+        "total_alu_energy_normalized",
+        "total_comm_energy_normalized",
         "throughput_tok_per_s",
         "throughput_normalized",
         "avg_queue_delay_s",
@@ -785,7 +814,7 @@ def main() -> None:
         raise SystemExit(f"results root does not exist: {results_root}")
 
     latest_records, dropped_records = discover_latest_summaries(results_root)
-    complete_df = build_complete_dataframe(latest_records, baseline_mode=args.baseline_mode)
+    complete_df = build_complete_dataframe(latest_records, throughput_baseline_mode=args.baseline_mode)
     plotted, trace_groups, model_groups = assign_plot_positions(complete_df)
 
     csv_path = output_dir / "generation_metrics_dedup.csv"
@@ -815,7 +844,7 @@ def main() -> None:
         trace_groups,
         model_groups,
         "ttft_raw_normalized",
-        "Generation TTFT (Raw, Normalized to AttAcc)",
+        "Generation TTFT (Raw, Normalized to VStack-O)",
         "Normalized TTFT",
         output_dir / f"generation_ttft_normalized_raw.{args.format}",
         args.format,
@@ -826,7 +855,7 @@ def main() -> None:
         trace_groups,
         model_groups,
         "ttft_minus_queue_normalized",
-        "Generation TTFT (Avg Queue Delay Removed, Then Normalized)",
+        "Generation TTFT (Avg Queue Delay Removed, Then Normalized to VStack-O)",
         "Normalized TTFT",
         output_dir / f"generation_ttft_normalized_minus_queue.{args.format}",
         args.format,
@@ -837,7 +866,7 @@ def main() -> None:
         trace_groups,
         model_groups,
         "latency_raw_normalized",
-        "Generation Latency (Raw, Normalized to AttAcc)",
+        "Generation Latency (Raw, Normalized to VStack-O)",
         "Normalized Latency",
         output_dir / f"generation_latency_normalized_raw.{args.format}",
         args.format,
@@ -848,7 +877,7 @@ def main() -> None:
         trace_groups,
         model_groups,
         "latency_minus_queue_normalized",
-        "Generation Latency (Avg Queue Delay Removed, Then Normalized)",
+        "Generation Latency (Avg Queue Delay Removed, Then Normalized to VStack-O)",
         "Normalized Latency",
         output_dir / f"generation_latency_normalized_minus_queue.{args.format}",
         args.format,

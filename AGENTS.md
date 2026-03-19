@@ -130,10 +130,15 @@ For each change step:
 - Dedup rule:
   - if multiple summaries map to the same `(model, trace_family, mode)`, keep the newest file by `<date>` folder and filename `<HHMMSS>` suffix
 - Queue-adjusted metrics:
-  - raw TTFT and latency are normalized directly to `attacc`
-  - adjusted TTFT and latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `attacc` adjusted value
+  - raw TTFT and latency are normalized directly to `vstack-o`
+  - adjusted TTFT and latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `vstack-o` adjusted value
+- Baselines:
+  - energy breakdown is normalized to `vstack-o`
+  - throughput remains normalized to the plotting CLI throughput baseline, default `attacc`
 - Large normalized outliers:
   - if a normalized throughput or latency/TTFT value exceeds `10`, the plot uses a broken y-axis with diagonal break marks so smaller bars remain readable
+- Trace filtering:
+  - skip the legacy `example` trace family so it never appears in labels or the deduplicated CSV
 - Missing data:
   - keep the label and leave the bar empty when a summary or baseline is missing
 
