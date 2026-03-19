@@ -329,7 +329,7 @@ _UNIFIED_DEFAULTS = {
     'max_batch_size': 16,
     'prefill_chunk_tokens': 128,
     'trace_scheduler': 'continuous',
-    'timestamp_scaling': 1.0,
+    'QPS': None,
     'trace_debug': False,
     'trace_debug_interval': 100,
     # kv_arch (sentinel: None means use DEFAULT_HETERO_KV_ARCH)
@@ -354,6 +354,8 @@ def load_unified_config(yaml_path: str) -> argparse.Namespace:
     for section_name in ('system', 'pim', 'model', 'workload', 'trace'):
         section = parsed.get(section_name, {})
         if isinstance(section, dict):
+            if section_name == 'trace' and 'timestamp_scaling' in section:
+                raise ValueError("trace.timestamp_scaling is no longer supported; use trace.QPS")
             for key, value in section.items():
                 if key in cfg:
                     cfg[key] = value
@@ -380,13 +382,19 @@ def load_unified_config(yaml_path: str) -> argparse.Namespace:
     cfg['max_batch_size'] = int(cfg['max_batch_size'])
     cfg['prefill_chunk_tokens'] = int(cfg['prefill_chunk_tokens'])
     cfg['trace_debug_interval'] = int(cfg['trace_debug_interval'])
-    cfg['timestamp_scaling'] = float(cfg['timestamp_scaling'])
+    if cfg['QPS'] is not None:
+        cfg['QPS'] = float(cfg['QPS'])
     cfg['powerlimit'] = bool(cfg['powerlimit'])
     cfg['ffopt'] = bool(cfg['ffopt'])
     cfg['pipeopt'] = bool(cfg['pipeopt'])
     cfg['trace_debug'] = bool(cfg['trace_debug'])
     if cfg['gmemcap'] is not None:
         cfg['gmemcap'] = int(cfg['gmemcap'])
+    if str(cfg['mode']).lower() == 'trace':
+        if cfg['QPS'] is None:
+            raise ValueError("trace.QPS is required when workload.mode is trace")
+        if cfg['QPS'] <= 0.0:
+            raise ValueError(f"trace.QPS must be > 0, got {cfg['QPS']}")
 
     return argparse.Namespace(**cfg)
 

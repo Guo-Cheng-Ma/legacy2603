@@ -160,8 +160,9 @@ The Python frontend is responsible for user-facing configuration and high-level 
   - selects fixed mode or trace mode
 - `src/config.py`
   - holds hardware defaults, model tables, topology derivation, energy tables, and KV policy presets
-  - converts YAML inputs into validated runtime settings
+  - converts YAML inputs into validated runtime settings, including required trace `QPS`
   - resolves model/trace-specific replica reserve ratios when YAML leaves them unset
+  - checked-in matrix configs under `configs/*/*/*.yaml` now default to `trace_debug: true` with `trace_debug_interval: 1`
 - `src/type.py`
   - defines enums for devices, layer types, PIM types, interfaces, and precision
 
@@ -189,7 +190,7 @@ This layer answers questions such as:
 These modules turn the fixed-shape estimator into a request-driven serving simulator.
 
 - `src/trace_loader.py`
-  - reads JSONL traces and validates the request format
+  - reads JSONL traces, validates the request format, and derives the raw-trace-QPS to timestamp-scale mapping from YAML `QPS`
 - `src/request_state.py`
   - stores immutable trace metadata plus mutable runtime state
 - `src/kv_cache.py`
@@ -200,6 +201,7 @@ These modules turn the fixed-shape estimator into a request-driven serving simul
   - simulates FIFO static batching without mid-batch backfill
 - `src/trace_simulator.py`
   - ties loader, cache, scheduler, and output writers together
+  - reports raw QPS, requested QPS, derived timestamp scale factor, and effective QPS in the trace summary
 
 For matrix configs stored under `configs/<family>/<trace>/...`, trace outputs are now grouped under the mirrored result hierarchy:
 

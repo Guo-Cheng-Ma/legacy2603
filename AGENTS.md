@@ -44,6 +44,7 @@ timeline.csv                   # Step-by-step change log (append after each comm
 
 ### Trace Mode (`--mode trace`)
 - JSONL-driven requests with `timestamp`, `input_length`, `output_length`, `hash_ids`.
+- YAML trace configs provide `QPS`; the loader derives a timestamp scale factor from the trace's raw QPS and applies it during load.
 - Scheduler choices: `--trace-scheduler continuous` (default) or `static`.
 - Continuous: chunked prefill + per-token decode + immediate backfill.
 - Static: batch-at-a-time, decode runs `max(output_length)` steps, no backfill.
@@ -76,6 +77,10 @@ Unless the user says otherwise, assume:
 - `powerlimit: true`
 - `ffopt: true`
 - `pipeopt: true`
+- `trace_debug: true`
+- `trace_debug_interval: 1`
+
+The checked-in matrix configs under `configs/*/*/*.yaml` should default to trace debug mode on.
 
 For BA Ramulator cache warmup, match the same power mode:
 - use `--power-modes 1` by default
@@ -188,7 +193,7 @@ Models defined in `config.py:make_model_config()`:
 
 ```csv
 timestamp,step,status,files,build,notes
-2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added --timestamp-scaling...
+2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added trace arrival-rate control metadata...
 ```
 - Step IDs: C1, C2, ... (sequential)
-- Latest step: C60
+- Latest step: C65

@@ -207,7 +207,7 @@ def run_trace_simulation(
     max_batch_size: int,
     prefill_chunk_tokens: int,
     kv_arch_config: str,
-    timestamp_scaling: float = 1.0,
+    requested_qps: float,
     trace_debug: bool = False,
     trace_debug_interval: int = 100,
     pipe_level: bool = False,
@@ -220,12 +220,12 @@ def run_trace_simulation(
 ):
     if trace_debug:
         print(
-            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_arch_config={} timestamp_scaling={}".format(
+            "[TRACE][sim] start trace_file={} max_batch_size={} prefill_chunk_tokens={} kv_arch_config={} requested_qps={}".format(
                 trace_file,
                 max_batch_size,
                 prefill_chunk_tokens,
                 kv_arch_config,
-                timestamp_scaling,
+                requested_qps,
             )
         )
     kv_arch_cfg = resolve_kv_policy_config(
@@ -234,15 +234,18 @@ def run_trace_simulation(
         hetero_kv_arch=kv_arch_config,
     )
     bw_cfg = get_hetero_transfer_bandwidths(kv_arch_cfg)
-    requests = load_request_states(trace_file, timestamp_scale=timestamp_scaling)
+    requests, trace_qps_meta = load_request_states(trace_file, requested_qps=requested_qps)
     if trace_debug:
         first_ts = requests[0].timestamp if requests else 0.0
         last_ts = requests[-1].timestamp if requests else 0.0
         print(
-            "[TRACE][sim] parsed requests={} first_ts={:.6f} last_ts={:.6f}".format(
+            "[TRACE][sim] parsed requests={} first_ts={:.6f} last_ts={:.6f} raw_qps={:.6f} requested_qps={:.6f} timestamp_scale_factor={:.6f}".format(
                 len(requests),
                 first_ts,
                 last_ts,
+                trace_qps_meta.raw_qps,
+                trace_qps_meta.requested_qps,
+                trace_qps_meta.timestamp_scale_factor,
             )
         )
     kv_cache, kv_caps = _build_kv_cache(system, kv_arch_cfg)
@@ -371,7 +374,10 @@ def run_trace_simulation(
     summary['power_constraint'] = bool(power_constraint)
     summary['max_batch_size'] = int(max_batch_size)
     summary['prefill_chunk_tokens'] = int(prefill_chunk_tokens)
-    summary['timestamp_scaling'] = float(timestamp_scaling)
+    summary['trace_raw_qps'] = float(trace_qps_meta.raw_qps)
+    summary['requested_qps'] = float(trace_qps_meta.requested_qps)
+    summary['raw_arrival_span_s'] = float(trace_qps_meta.raw_arrival_span_s)
+    summary['timestamp_scale_factor'] = float(trace_qps_meta.timestamp_scale_factor)
     summary['kv_capacity_mode'] = "hetero_3tier"
     summary['kv_arch_config'] = kv_arch_config
     summary['trace_family'] = kv_arch_cfg.get("TRACE_FAMILY", "")
@@ -544,7 +550,10 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'avg_batch_max_output_tokens',
         'decode_padded_tokens',
         'prefill_chunk_tokens',
-        'timestamp_scaling',
+        'trace_raw_qps',
+        'requested_qps',
+        'raw_arrival_span_s',
+        'timestamp_scale_factor',
         'trace_family',
         'kv_capacity_mode',
         'kv_arch_config',
@@ -807,7 +816,7 @@ def run_trace_mode(system, args):
         max_batch_size=args.max_batch_size,
         prefill_chunk_tokens=args.prefill_chunk_tokens,
         kv_arch_config=args.kv_arch_config,
-        timestamp_scaling=args.timestamp_scaling,
+        requested_qps=args.QPS,
         trace_debug=args.trace_debug,
         trace_debug_interval=args.trace_debug_interval,
         pipe_level=args.pipeopt,

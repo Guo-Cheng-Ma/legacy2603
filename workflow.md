@@ -20,6 +20,7 @@ python3 main.py --config <yaml>
   - `kv_arch`
 - The loader accepts normal PyYAML when available and falls back to the project's minimal parser when it is not.
 - `kv_arch` is now part of the same unified config. The old standalone `configs/kv_arch.yaml` workflow is no longer the frontend contract.
+- The checked-in matrix configs under `configs/*/*/*.yaml` now default to `trace_debug: true` and `trace_debug_interval: 1`.
 
 Minimal config shape:
 
@@ -54,9 +55,9 @@ trace:
   max_batch_size: 16
   prefill_chunk_tokens: 128
   trace_scheduler: continuous
-  timestamp_scaling: 1.0
-  trace_debug: false
-  trace_debug_interval: 100
+  QPS: 4.0
+  trace_debug: true
+  trace_debug_interval: 1
 
 kv_arch:
   num_cards: 8
@@ -144,8 +145,9 @@ workload:
    - `type`
    - `turn`
    - `hash_ids`
-3. `timestamp_scaling` is applied during load, so effective arrival rate can be changed without rewriting the trace file.
-4. The block size is fixed at 16 tokens and validation requires:
+3. `QPS` is required in the YAML trace section. The loader computes `trace_raw_qps = num_requests / (max(timestamp) - min(timestamp))`, derives `timestamp_scale_factor = trace_raw_qps / QPS`, and multiplies every request timestamp by that factor during load.
+4. Traces with fewer than 2 requests or zero timestamp span fail fast because raw QPS cannot be derived.
+5. The block size is fixed at 16 tokens and validation requires:
 
 ```text
 len(hash_ids) == ceil(input_length / 16)
@@ -309,7 +311,7 @@ Summary YAML contains:
 
 - run metadata: system, GPU, PIM type, model, dtype, scheduler knobs
 - KV policy metadata: `trace_family`, `eviction_policy_cfg`, `placement_policy_cfg`, `replica_tier_cfg`, and resolved reserve ratios
-- arrival and completion metrics: total time, QPS, latency, TTFT, queue delay, throughput
+- arrival and completion metrics: total time, raw/effective QPS, requested QPS, timestamp scale factor, latency, TTFT, queue delay, throughput
 - batch metrics: batch counts and padding stats for static scheduling
 - topology-derived KV config: per-card memory, tier capacities, bandwidth config, bytes per block
 - tier state: resident blocks, L1/L2/L3 occupancy, hit counters, hit rates, used ratios
@@ -344,7 +346,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - set `workload.mode: trace`
    - confirm `results/<date>/<family>/<trace>/S-...yaml` and `R-...jsonl` are produced for matrix configs under `configs/<family>/<trace>/...`
 5. Trace sanity checks:
-   - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, and `trace_qps`
+   - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, `trace_raw_qps`, `requested_qps`, `timestamp_scale_factor`, and `trace_qps`
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
    - when policy mode is enabled, verify `eviction_policy_cfg`, `placement_policy_cfg`, `replica_*`, and `same_chat_hit_rate`
    - verify output format assumptions: summary is YAML, requests are JSONL
@@ -367,5 +369,5 @@ The following are stale and should not be reintroduced into documentation or scr
 - flat `trace_summary_*.csv` and `trace_requests_*.csv` outputs
 - topology-agnostic KV accounting that only tracks global L1/L2/L3 totals
 - docs that describe trace-mode cache policy as fixed pure-LRU with only unique-copy placement
-- documentation that ignores `die_type`, `num_pim_die`, `compute_stack_l1`, `capacity_stack_l2`, or `timestamp_scaling`
+- documentation that ignores `die_type`, `num_pim_die`, `compute_stack_l1`, `capacity_stack_l2`, or the YAML `QPS` trace-rate control
 - result-analysis scripts that ignore deduplication, queue-delay-adjusted TTFT/latency, or the fixed five-mode comparison order

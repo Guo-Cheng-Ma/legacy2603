@@ -207,7 +207,7 @@ def main():
             max_batch_size=args.max_batch_size,
             prefill_chunk_tokens=args.prefill_chunk_tokens,
             kv_arch_config=args.kv_arch_config,
-            timestamp_scaling=args.timestamp_scaling,
+            requested_qps=args.QPS,
             trace_debug=args.trace_debug,
             trace_debug_interval=args.trace_debug_interval,
             pipe_level=args.pipeopt,

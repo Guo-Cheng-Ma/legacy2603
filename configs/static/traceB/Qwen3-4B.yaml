@@ -28,9 +28,9 @@ trace:
   max_batch_size: 16
   prefill_chunk_tokens: 128
   trace_scheduler: static
-  timestamp_scaling: 6.0
-  trace_debug: false
-  trace_debug_interval: 100
+  QPS: 4.0
+  trace_debug: true
+  trace_debug_interval: 1
 
 kv_arch:
   num_cards: 8
