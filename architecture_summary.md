@@ -206,6 +206,15 @@ For matrix configs stored under `configs/<family>/<trace>/...`, trace outputs ar
 - `results/<date>/<family>/<trace>/S-*.yaml`
 - `results/<date>/<family>/<trace>/R-*.jsonl`
 
+The frontend also has a lightweight post-processing layer under `tools/` for analysis-ready figure generation:
+
+- `tools/plot_generation_results.py`
+  - scans trace summary YAMLs
+  - deduplicates repeated runs by `(model, trace_family, mode)` while keeping the newest summary
+  - exports a tidy CSV plus matplotlib figures under `figures/`
+  - renders total energy breakdown, normalized throughput, normalized TTFT, and normalized latency
+  - keeps empty slots visible when a `(model, trace_family, mode)` combination is missing
+
 This layer answers questions such as:
 
 - how arrival rate affects TTFT and latency
@@ -214,6 +223,7 @@ This layer answers questions such as:
 - whether workload-aware eviction improves reuse over the `all_unique + lru` baseline
 - whether bounded hotset replication reduces cross-card callbacks enough to justify reserved space
 - how scheduling policy changes throughput and queue delay
+- how the five published modes (`attacc`, `static`, `uniform`, `vstack-b`, `vstack-o`) compare after deduplication and queue-delay adjustment
 
 ### Backend layer: Ramulator2
 

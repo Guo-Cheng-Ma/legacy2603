@@ -30,6 +30,7 @@ ramulator2/                    # C++ cycle-accurate DRAM/PIM simulator (DO NOT M
 llm-req-inputs/                # JSONL request traces (large files, do not cat)
 ramulator.out                  # Ramulator result cache CSV (accelerates re-runs)
 results/                       # Output directory for batch experiment results
+tools/                         # Post-processing helpers (e.g. result figure generation)
 timeline.csv                   # Step-by-step change log (append after each committed step)
 ```
 
@@ -48,6 +49,7 @@ timeline.csv                   # Step-by-step change log (append after each comm
 - Static: batch-at-a-time, decode runs `max(output_length)` steps, no backfill.
 - Global KV reuse by `hash_id` with 3-tier LRU (L1/L2/L3) and migration penalties.
 - Output: `results/<date>/<family>/<trace>/S-*.yaml` + `results/<date>/<family>/<trace>/R-*.jsonl` when the input config is under `configs/<family>/<trace>/`; otherwise it falls back to `results/<date>/<trace>/...`.
+- Figure generation: `python3 tools/plot_generation_results.py` scans `S-*.yaml`, keeps only the newest `(model, trace_family, mode)` summary, and writes analysis figures plus `generation_metrics_dedup.csv` under `figures/` by default.
 
 ## Key Constraints and Rules
 
@@ -92,6 +94,9 @@ For each change step:
    # Trace mode smoke test (small subset)
    python3 main.py --mode trace --system dgx-attacc --gpu A100a --ngpu 8 --model Qwen3-32B --pim bank \
      --trace-file llm-req-inputs/example.jsonl --max-batch-size 16 --prefill-chunk-tokens 128
+
+   # Result-figure smoke test
+   python3 tools/plot_generation_results.py --results-root results --output-dir figures
    ```
 4. **Commit**: `git add <files> && git commit -m "<message>"`
 5. **Push**: `git push`
@@ -99,6 +104,36 @@ For each change step:
    ```
    timestamp,step,status,files,build,notes
    ```
+
+## Result Figure Workflow
+
+- Default command:
+  ```bash
+  python3 tools/plot_generation_results.py --results-root results --output-dir figures
+  ```
+- Default outputs:
+  - `figures/generation_energy_breakdown.png`
+  - `figures/generation_throughput_normalized.png`
+  - `figures/generation_ttft_normalized_raw.png`
+  - `figures/generation_ttft_normalized_minus_queue.png`
+  - `figures/generation_latency_normalized_raw.png`
+  - `figures/generation_latency_normalized_minus_queue.png`
+  - `figures/generation_metrics_dedup.csv`
+- Grouping:
+  - bottom layer: model
+  - middle layer: canonical trace family
+  - top layer: mode in fixed order `attacc`, `static`, `uniform`, `vstack-b`, `vstack-o`
+- Mode normalization:
+  - `static` is `attacc` hardware with `trace_scheduler_mode: static`
+  - `vstack-b` is the `vstack` baseline (`lru` + `all_unique`)
+  - `vstack-o` is the optimized `vstack` mode (`aware` or `hotset_broadcast`)
+- Dedup rule:
+  - if multiple summaries map to the same `(model, trace_family, mode)`, keep the newest file by `<date>` folder and filename `<HHMMSS>` suffix
+- Queue-adjusted metrics:
+  - raw TTFT and latency are normalized directly to `attacc`
+  - adjusted TTFT and latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `attacc` adjusted value
+- Missing data:
+  - keep the label and leave the bar empty when a summary or baseline is missing
 
 ## Warm Cache Pregeneration
 

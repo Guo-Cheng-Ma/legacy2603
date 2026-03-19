@@ -348,6 +348,12 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
    - when policy mode is enabled, verify `eviction_policy_cfg`, `placement_policy_cfg`, `replica_*`, and `same_chat_hit_rate`
    - verify output format assumptions: summary is YAML, requests are JSONL
+6. Figure-generation smoke:
+   - run `python3 tools/plot_generation_results.py --results-root results --output-dir figures`
+   - confirm the deduplicated CSV and the six figure files are produced under `figures/`
+   - verify repeated `(model, trace_family, mode)` summaries keep only the newest run
+   - verify normalized TTFT/latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `attacc` baseline
+   - verify missing modes remain labeled but draw no bar
 
 ## 8) Obsolete assumptions from older docs
 
@@ -359,3 +365,4 @@ The following are stale and should not be reintroduced into documentation or scr
 - topology-agnostic KV accounting that only tracks global L1/L2/L3 totals
 - docs that describe trace-mode cache policy as fixed pure-LRU with only unique-copy placement
 - documentation that ignores `die_type`, `num_pim_die`, `compute_stack_l1`, `capacity_stack_l2`, or `timestamp_scaling`
+- result-analysis scripts that ignore deduplication, queue-delay-adjusted TTFT/latency, or the fixed five-mode comparison order
