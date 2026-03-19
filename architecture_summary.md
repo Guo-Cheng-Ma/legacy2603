@@ -211,8 +211,9 @@ The frontend also has a lightweight post-processing layer under `tools/` for ana
 - `tools/plot_generation_results.py`
   - scans trace summary YAMLs
   - deduplicates repeated runs by `(model, trace_family, mode)` while keeping the newest summary
-  - exports a tidy CSV plus matplotlib figures under `figures/`
+  - exports a tidy CSV plus matplotlib figures under `figure/<yymmdd>-<hhmm>/` by default
   - renders total energy breakdown, normalized throughput, normalized TTFT, and normalized latency
+  - uses a broken y-axis for normalized plots when large outliers would otherwise flatten the smaller bars
   - keeps empty slots visible when a `(model, trace_family, mode)` combination is missing
 
 This layer answers questions such as:

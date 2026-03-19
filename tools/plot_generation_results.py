@@ -17,6 +17,7 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager, rcParams
     from matplotlib import transforms
 except ImportError as exc:
     raise SystemExit(
@@ -26,6 +27,9 @@ except ImportError as exc:
 
 
 MODE_ORDER = ["attacc", "static", "uniform", "vstack-b", "vstack-o"]
+MODE_TICK_ROTATION = 33
+BREAK_THRESHOLD = 10.0
+BREAK_MARK_SIZE = 0.007
 MODE_COLORS = {
     "attacc": "#0b3954",
     "static": "#b85c38",
@@ -70,6 +74,21 @@ TRACE_ORDER_HINTS = {
 NATURAL_RE = re.compile(r"(\d+)")
 DATE_TAG_RE = re.compile(r"^\d{6}$")
 
+rcParams["font.family"] = "sans-serif"
+rcParams["font.sans-serif"] = ["Arial", "Liberation Sans", "DejaVu Sans"]
+
+
+def default_output_dir() -> Path:
+    return Path("figure") / datetime.now().strftime("%y%m%d-%H%M")
+
+
+def requested_font_name() -> str:
+    try:
+        font_manager.findfont("Arial", fallback_to_default=False)
+        return "Arial"
+    except ValueError:
+        return "Liberation Sans"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -85,8 +104,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default="figures",
-        help="Directory where figures and the CSV summary are written.",
+        default=None,
+        help="Directory where figures and the CSV summary are written. Default: figure/<yymmdd>-<hhmm>/",
     )
     parser.add_argument(
         "--baseline-mode",
@@ -477,7 +496,7 @@ def choose_energy_unit(max_energy_nj: float) -> Tuple[float, str]:
 
 
 def apply_common_axis_style(
-    ax,
+    axes,
     plotted: pd.DataFrame,
     trace_groups: List[Dict[str, object]],
     model_groups: List[Dict[str, object]],
@@ -485,36 +504,54 @@ def apply_common_axis_style(
     ylabel: str,
     show_reference_line: bool = False,
 ) -> None:
-    ax.set_title(title, fontsize=15, weight="bold", pad=14)
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(plotted["x"].tolist())
-    ax.set_xticklabels(plotted["mode"].tolist(), rotation=0, fontsize=9)
-    ax.grid(axis="y", color="#d9d9d9", linestyle="--", linewidth=0.7, alpha=0.8)
-    ax.set_axisbelow(True)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    if show_reference_line:
-        ax.axhline(1.0, color="#444444", linestyle=":", linewidth=1.1)
+    axis_list = list(axes) if isinstance(axes, (list, tuple, np.ndarray)) else [axes]
+    top_axis = axis_list[0]
+    bottom_axis = axis_list[-1]
 
-    text_transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+    top_axis.set_title(title, fontsize=15, weight="bold", pad=14)
+    bottom_axis.set_ylabel(ylabel)
+    bottom_axis.set_xticks(plotted["x"].tolist())
+    bottom_axis.set_xticklabels(
+        plotted["mode"].tolist(),
+        rotation=MODE_TICK_ROTATION,
+        fontsize=9,
+        ha="right",
+        rotation_mode="anchor",
+    )
+
+    for axis in axis_list:
+        axis.grid(axis="y", color="#d9d9d9", linestyle="--", linewidth=0.7, alpha=0.8)
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        if show_reference_line:
+            axis.axhline(1.0, color="#444444", linestyle=":", linewidth=1.1)
+
+    for axis in axis_list[:-1]:
+        axis.tick_params(labelbottom=False, bottom=False)
+
+    text_transform = transforms.blended_transform_factory(bottom_axis.transData, bottom_axis.transAxes)
     for group in trace_groups[:-1]:
-        ax.axvline(group["after"], color="#d0d0d0", linewidth=0.8, linestyle="-")
+        for axis in axis_list:
+            axis.axvline(group["after"], color="#d0d0d0", linewidth=0.8, linestyle="-")
     for group in model_groups[:-1]:
-        ax.axvline(group["after"] + 0.2, color="#8a8a8a", linewidth=1.1, linestyle="-")
+        for axis in axis_list:
+            axis.axvline(group["after"] + 0.2, color="#8a8a8a", linewidth=1.1, linestyle="-")
     for group in trace_groups:
-        ax.text(
+        bottom_axis.text(
             group["center"],
-            -0.16,
+            -0.23,
             group["label"],
             ha="center",
             va="top",
             fontsize=10,
+            rotation=12,
             transform=text_transform,
         )
     for group in model_groups:
-        ax.text(
+        bottom_axis.text(
             group["center"],
-            -0.30,
+            -0.42,
             group["label"],
             ha="center",
             va="top",
@@ -527,6 +564,76 @@ def apply_common_axis_style(
 def figure_size_for_slots(slot_count: int) -> Tuple[float, float]:
     width = max(13.0, slot_count * 0.34)
     return width, 7.6
+
+
+def plot_break_marks(top_axis, bottom_axis) -> None:
+    kwargs = dict(color="#444444", clip_on=False, linewidth=1.0)
+    top_axis.plot(
+        (-BREAK_MARK_SIZE, +BREAK_MARK_SIZE),
+        (-BREAK_MARK_SIZE, +BREAK_MARK_SIZE),
+        transform=top_axis.transAxes,
+        **kwargs,
+    )
+    top_axis.plot(
+        (1 - BREAK_MARK_SIZE, 1 + BREAK_MARK_SIZE),
+        (-BREAK_MARK_SIZE, +BREAK_MARK_SIZE),
+        transform=top_axis.transAxes,
+        **kwargs,
+    )
+    bottom_axis.plot(
+        (-BREAK_MARK_SIZE, +BREAK_MARK_SIZE),
+        (1 - BREAK_MARK_SIZE, 1 + BREAK_MARK_SIZE),
+        transform=bottom_axis.transAxes,
+        **kwargs,
+    )
+    bottom_axis.plot(
+        (1 - BREAK_MARK_SIZE, 1 + BREAK_MARK_SIZE),
+        (1 - BREAK_MARK_SIZE, 1 + BREAK_MARK_SIZE),
+        transform=bottom_axis.transAxes,
+        **kwargs,
+    )
+
+
+def normalized_break_limits(values: np.ndarray) -> Optional[Tuple[float, float, float]]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    max_value = float(np.max(finite))
+    if max_value <= BREAK_THRESHOLD:
+        return None
+
+    small = finite[finite <= BREAK_THRESHOLD]
+    large = finite[finite > BREAK_THRESHOLD]
+    if large.size == 0:
+        return None
+
+    if small.size > 0:
+        lower_max = min(BREAK_THRESHOLD, max(1.25, float(np.max(small)) * 1.12))
+    else:
+        lower_max = 2.0
+
+    upper_min = max(BREAK_THRESHOLD, float(np.min(large)) * 0.90)
+    if upper_min <= lower_max:
+        upper_min = lower_max + max(1.0, 0.08 * max_value)
+    upper_max = max_value * 1.05
+    if upper_min >= upper_max:
+        return None
+    return lower_max, upper_min, upper_max
+
+
+def draw_mode_bars(ax, plotted: pd.DataFrame, metric_column: str) -> None:
+    for mode in MODE_ORDER:
+        mode_rows = plotted[plotted["mode"] == mode]
+        values = mode_rows[metric_column].to_numpy(dtype=float)
+        mask = np.isfinite(values)
+        ax.bar(
+            mode_rows.loc[mask, "x"],
+            values[mask],
+            width=0.82,
+            color=MODE_COLORS[mode],
+            edgecolor="white",
+            linewidth=0.5,
+        )
 
 
 def plot_energy_breakdown(
@@ -563,7 +670,7 @@ def plot_energy_breakdown(
         bottoms[mask] += heights[mask]
 
     apply_common_axis_style(
-        ax,
+        [ax],
         plotted,
         trace_groups,
         model_groups,
@@ -571,7 +678,7 @@ def plot_energy_breakdown(
         ylabel=f"Energy ({unit})",
     )
     ax.legend(loc="upper left", ncol=len(ENERGY_COMPONENTS), frameon=False, fontsize=9)
-    fig.subplots_adjust(bottom=0.28, top=0.88, left=0.08, right=0.99)
+    fig.subplots_adjust(bottom=0.38, top=0.88, left=0.08, right=0.99)
     fig.savefig(output_path, format=fmt, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -587,30 +694,49 @@ def plot_normalized_metric(
     fmt: str,
     dpi: int,
 ) -> None:
-    fig, ax = plt.subplots(figsize=figure_size_for_slots(len(plotted)))
-    for mode in MODE_ORDER:
-        mode_rows = plotted[plotted["mode"] == mode]
-        values = mode_rows[metric_column].to_numpy(dtype=float)
-        mask = np.isfinite(values)
-        ax.bar(
-            mode_rows.loc[mask, "x"],
-            values[mask],
-            width=0.82,
-            color=MODE_COLORS[mode],
-            edgecolor="white",
-            linewidth=0.5,
-        )
+    values = plotted[metric_column].to_numpy(dtype=float)
+    broken_limits = normalized_break_limits(values)
 
-    apply_common_axis_style(
-        ax,
-        plotted,
-        trace_groups,
-        model_groups,
-        title=title,
-        ylabel=ylabel,
-        show_reference_line=True,
-    )
-    fig.subplots_adjust(bottom=0.28, top=0.90, left=0.08, right=0.99)
+    if broken_limits is None:
+        fig, ax = plt.subplots(figsize=figure_size_for_slots(len(plotted)))
+        draw_mode_bars(ax, plotted, metric_column)
+        apply_common_axis_style(
+            [ax],
+            plotted,
+            trace_groups,
+            model_groups,
+            title=title,
+            ylabel=ylabel,
+            show_reference_line=True,
+        )
+        fig.subplots_adjust(bottom=0.38, top=0.90, left=0.08, right=0.99)
+    else:
+        fig, (ax_top, ax_bottom) = plt.subplots(
+            2,
+            1,
+            sharex=True,
+            figsize=(figure_size_for_slots(len(plotted))[0], 8.6),
+            gridspec_kw={"height_ratios": [1.25, 3.4], "hspace": 0.05},
+        )
+        draw_mode_bars(ax_top, plotted, metric_column)
+        draw_mode_bars(ax_bottom, plotted, metric_column)
+        lower_max, upper_min, upper_max = broken_limits
+        ax_bottom.set_ylim(0.0, lower_max)
+        ax_top.set_ylim(upper_min, upper_max)
+        ax_top.spines["bottom"].set_visible(False)
+        ax_bottom.spines["top"].set_visible(False)
+        plot_break_marks(ax_top, ax_bottom)
+        apply_common_axis_style(
+            [ax_top, ax_bottom],
+            plotted,
+            trace_groups,
+            model_groups,
+            title=title,
+            ylabel=ylabel,
+            show_reference_line=True,
+        )
+        fig.subplots_adjust(bottom=0.36, top=0.90, left=0.08, right=0.99)
+
     fig.savefig(output_path, format=fmt, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
@@ -652,7 +778,7 @@ def write_csv(df: pd.DataFrame, output_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     results_root = Path(args.results_root)
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else default_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not results_root.exists():
@@ -731,6 +857,7 @@ def main() -> None:
 
     print(f"selected summaries: {len(latest_records)}")
     print(f"dropped older duplicates: {len(dropped_records)}")
+    print(f"font request: {requested_font_name()}")
     print(f"csv: {csv_path}")
     print(f"figures: {output_dir}")
 

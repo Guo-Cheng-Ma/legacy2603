@@ -349,10 +349,11 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - when policy mode is enabled, verify `eviction_policy_cfg`, `placement_policy_cfg`, `replica_*`, and `same_chat_hit_rate`
    - verify output format assumptions: summary is YAML, requests are JSONL
 6. Figure-generation smoke:
-   - run `python3 tools/plot_generation_results.py --results-root results --output-dir figures`
-   - confirm the deduplicated CSV and the six figure files are produced under `figures/`
+   - run `python3 tools/plot_generation_results.py --results-root results`
+   - confirm the deduplicated CSV and the six figure files are produced under `figure/<yymmdd>-<hhmm>/`
    - verify repeated `(model, trace_family, mode)` summaries keep only the newest run
    - verify normalized TTFT/latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `attacc` baseline
+   - verify normalized plots use the broken-axis view when any plotted value exceeds `10`
    - verify missing modes remain labeled but draw no bar
 
 ## 8) Obsolete assumptions from older docs
