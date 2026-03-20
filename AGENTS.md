@@ -50,7 +50,8 @@ timeline.csv                   # Step-by-step change log (append after each comm
 - Static: batch-at-a-time, decode runs `max(output_length)` steps, no backfill.
 - Global KV reuse by `hash_id` with 3-tier LRU (L1/L2/L3) and migration penalties.
 - Output: `results/<date>/<family>/<trace>/S-*.yaml` + `results/<date>/<family>/<trace>/R-*.jsonl` when the input config is under `configs/<family>/<trace>/`; otherwise it falls back to `results/<date>/<trace>/...`.
-- Figure generation: `python3 tools/plot_generation_results.py` scans `S-*.yaml`, keeps only the newest `(model, trace_family, mode)` summary, and writes analysis figures plus `generation_metrics_dedup.csv` under `figure/<yymmdd>-<hhmm>/` by default.
+- Failed-run backfill: `python3 tools/backfill_failed_trace_summaries.py --summary-tsv tmux_status/<batch>/summary.tsv` synthesizes failed `S-*.yaml` summaries with `run_status`, `failure_reason_short`, and `failure_reason_detail` when a tmux job exits before normal output writing.
+- Figure generation: `python3 tools/plot_generation_results.py` scans `S-*.yaml`, keeps only the newest `(model, trace_family, mode)` summary, writes analysis figures plus `generation_metrics_dedup.csv` under `figure/<yymmdd>-<hhmm>/` by default, and annotates failed slots with their compact reason.
 
 ## Key Constraints and Rules
 
@@ -134,6 +135,10 @@ For each change step:
   - `vstack-o` is the optimized `vstack` mode (`aware` or `hotset_broadcast`)
 - Dedup rule:
   - if multiple summaries map to the same `(model, trace_family, mode)`, keep the newest file by `<date>` folder and filename `<HHMMSS>` suffix
+- Failed summaries:
+  - synthetic failed `S-*.yaml` records participate in the same dedup rule
+  - failed slots stay visible and render `failure_reason_short` at the original bar position
+  - failed backfills only create `S-*.yaml`, not `R-*.jsonl`
 - Queue-adjusted metrics:
   - raw TTFT and E2E latency are normalized directly to `vstack-o`
   - adjusted TTFT and E2E latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `vstack-o` adjusted value

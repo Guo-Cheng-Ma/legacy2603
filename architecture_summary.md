@@ -208,6 +208,8 @@ For matrix configs stored under `configs/<family>/<trace>/...`, trace outputs ar
 - `results/<date>/<family>/<trace>/S-*.yaml`
 - `results/<date>/<family>/<trace>/R-*.jsonl`
 
+When a tmux trace run fails before normal output writing, `tools/backfill_failed_trace_summaries.py` can synthesize a failed `S-*.yaml` in the same hierarchy. These backfilled summaries carry `run_status: failed`, a compact `failure_reason_short`, a detailed error string, and null metrics.
+
 The frontend also has a lightweight post-processing layer under `tools/` for analysis-ready figure generation:
 
 - `tools/plot_generation_results.py`
@@ -218,6 +220,7 @@ The frontend also has a lightweight post-processing layer under `tools/` for ana
   - uses a broken y-axis for normalized plots when large outliers would otherwise flatten the smaller bars
   - filters out the legacy `example` trace family from grouped analysis output
   - keeps empty slots visible when a `(model, trace_family, mode)` combination is missing
+  - keeps failed slots visible, including `uniform`, and prints the compact failure reason at the bar location
 
 This layer answers questions such as:
 

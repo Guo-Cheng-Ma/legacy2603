@@ -99,6 +99,8 @@ kv_arch:
   - FIFO static batching without mid-batch backfill.
 - `src/trace_simulator.py`
   - Builds the KV cache, runs the selected scheduler, and writes summary/request outputs.
+- `tools/backfill_failed_trace_summaries.py`
+  - Reads a tmux `summary.tsv`, classifies failed runs from their logs, and backfills synthetic failed `S-*.yaml` summaries for plotting and dedup.
 - `src/ramulator_wrapper.py`
   - Still handles PIM attention timing for fixed mode and any estimator path that calls Ramulator-backed attention.
 
@@ -152,6 +154,14 @@ workload:
 ```text
 len(hash_ids) == ceil(input_length / 16)
 ```
+
+When a tmux-launched trace run fails before normal output writing, you can backfill a synthetic failed summary with:
+
+```bash
+python3 tools/backfill_failed_trace_summaries.py --summary-tsv tmux_status/<batch>/summary.tsv
+```
+
+The backfilled YAML keeps the normal `(model, trace_family, mode)` identity fields, sets `run_status: failed`, records `failure_reason_short` and `failure_reason_detail`, and leaves performance/energy metrics null.
 
 ### 4.2 KV topology and policy construction
 
@@ -345,6 +355,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
 4. Trace-mode smoke:
    - set `workload.mode: trace`
    - confirm `results/<date>/<family>/<trace>/S-...yaml` and `R-...jsonl` are produced for matrix configs under `configs/<family>/<trace>/...`
+   - if validating failed backfill, confirm the synthetic failed path only emits `S-...yaml`
 5. Trace sanity checks:
    - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, `avg_tbt_s`, `avg_e2e_latency_s`, `trace_raw_qps`, `requested_qps`, `timestamp_scale_factor`, and `trace_qps`
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
@@ -359,6 +370,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - verify the legacy `example` trace family is excluded from the deduplicated CSV and figure labels
    - verify normalized plots use the broken-axis view when any plotted value exceeds `10`
    - verify missing modes remain labeled but draw no bar
+   - verify failed summaries remain labeled and print `failure_reason_short` at the original mode slot, including `uniform`
 
 ## 8) Obsolete assumptions from older docs
 

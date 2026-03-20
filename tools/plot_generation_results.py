@@ -18,6 +18,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import font_manager, rcParams
+    from matplotlib.patches import Patch
     from matplotlib import transforms
 except ImportError as exc:
     raise SystemExit(
@@ -27,6 +28,7 @@ except ImportError as exc:
 
 
 MODE_ORDER = ["attacc", "static", "uniform", "vstack-b", "vstack-o"]
+PLOTTED_MODE_ORDER = ["attacc", "static", "uniform", "vstack-b", "vstack-o"]
 MODE_TICK_ROTATION = 33
 BREAK_THRESHOLD = 10.0
 BREAK_MARK_SIZE = 0.007
@@ -56,6 +58,10 @@ TOP_LEVEL_FIELDS = [
     "trace_scheduler_mode",
     "eviction_policy_cfg",
     "placement_policy_cfg",
+    "run_status",
+    "failure_reason_short",
+    "failure_reason_detail",
+    "failure_exit_code",
     "total_energy_nj",
     "total_dram_energy_nj",
     "total_l2_energy_nj",
@@ -289,6 +295,10 @@ def discover_latest_summaries(results_root: Path) -> Tuple[List[Dict[str, object
             "trace_scheduler_mode": str(summary.get("trace_scheduler_mode") or ""),
             "eviction_policy_cfg": str(summary.get("eviction_policy_cfg") or ""),
             "placement_policy_cfg": str(summary.get("placement_policy_cfg") or ""),
+            "run_status": str(summary.get("run_status") or "completed"),
+            "failure_reason_short": str(summary.get("failure_reason_short") or ""),
+            "failure_reason_detail": str(summary.get("failure_reason_detail") or ""),
+            "failure_exit_code": metric_or_nan(summary, "failure_exit_code"),
             "total_energy_nj": metric_or_nan(summary, "total_energy_nj"),
             "total_dram_energy_nj": metric_or_nan(summary, "total_dram_energy_nj"),
             "total_l2_energy_nj": metric_or_nan(summary, "total_l2_energy_nj"),
@@ -384,6 +394,10 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                             "trace_scheduler_mode": "",
                             "eviction_policy_cfg": "",
                             "placement_policy_cfg": "",
+                            "run_status": "",
+                            "failure_reason_short": "",
+                            "failure_reason_detail": "",
+                            "failure_exit_code": math.nan,
                             "source_path": "",
                             "source_timestamp": "",
                         }
@@ -410,6 +424,10 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                             "trace_scheduler_mode": record["trace_scheduler_mode"],
                             "eviction_policy_cfg": record["eviction_policy_cfg"],
                             "placement_policy_cfg": record["placement_policy_cfg"],
+                            "run_status": record["run_status"],
+                            "failure_reason_short": record["failure_reason_short"],
+                            "failure_reason_detail": record["failure_reason_detail"],
+                            "failure_exit_code": record["failure_exit_code"],
                             "source_path": str(record["path"]),
                             "source_timestamp": record["timestamp"].isoformat(),
                         }
@@ -470,7 +488,7 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
 def assign_plot_positions(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str, object]], List[Dict[str, object]]]:
     trace_gap = 0.8
     model_gap = 1.4
-    plotted = df.copy()
+    plotted = df[df["mode"].isin(PLOTTED_MODE_ORDER)].copy()
     x_positions: List[float] = []
     trace_groups: List[Dict[str, object]] = []
     model_groups: List[Dict[str, object]] = []
@@ -486,7 +504,9 @@ def assign_plot_positions(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict[str
             trace_start = x_cursor
             trace_mask = model_mask & (plotted["trace_family"] == trace_family)
             trace_rows = plotted.loc[trace_mask].copy()
-            trace_rows["mode_rank"] = trace_rows["mode"].map({mode: idx for idx, mode in enumerate(MODE_ORDER)})
+            trace_rows["mode_rank"] = trace_rows["mode"].map(
+                {mode: idx for idx, mode in enumerate(PLOTTED_MODE_ORDER)}
+            )
             trace_rows = trace_rows.sort_values("mode_rank")
             for row_index in trace_rows.index:
                 row_order.append(row_index)
@@ -547,13 +567,8 @@ def apply_common_axis_style(
     top_axis.set_title(title, fontsize=15, weight="bold", pad=14)
     bottom_axis.set_ylabel(ylabel)
     bottom_axis.set_xticks(plotted["x"].tolist())
-    bottom_axis.set_xticklabels(
-        plotted["mode"].tolist(),
-        rotation=MODE_TICK_ROTATION,
-        fontsize=9,
-        ha="right",
-        rotation_mode="anchor",
-    )
+    bottom_axis.set_xticklabels([""] * len(plotted))
+    bottom_axis.tick_params(axis="x", length=0)
 
     for axis in axis_list:
         axis.grid(axis="y", color="#d9d9d9", linestyle="--", linewidth=0.7, alpha=0.8)
@@ -658,7 +673,7 @@ def normalized_break_limits(values: np.ndarray) -> Optional[Tuple[float, float, 
 
 
 def draw_mode_bars(ax, plotted: pd.DataFrame, metric_column: str) -> None:
-    for mode in MODE_ORDER:
+    for mode in PLOTTED_MODE_ORDER:
         mode_rows = plotted[plotted["mode"] == mode]
         values = mode_rows[metric_column].to_numpy(dtype=float)
         mask = np.isfinite(values)
@@ -672,6 +687,39 @@ def draw_mode_bars(ax, plotted: pd.DataFrame, metric_column: str) -> None:
         )
 
 
+def draw_failure_labels(ax, plotted: pd.DataFrame) -> None:
+    failed_rows = plotted[
+        plotted["has_summary"]
+        & (plotted["run_status"] == "failed")
+        & (plotted["failure_reason_short"].astype(str).str.len() > 0)
+    ].copy()
+    if failed_rows.empty:
+        return
+
+    text_transform = transforms.blended_transform_factory(ax.transData, ax.transAxes)
+    for row in failed_rows.itertuples(index=False):
+        ax.text(
+            row.x,
+            0.03,
+            str(row.failure_reason_short),
+            ha="center",
+            va="bottom",
+            rotation=90,
+            fontsize=8,
+            color="#8c1d18",
+            weight="bold",
+            transform=text_transform,
+            clip_on=False,
+        )
+
+
+def mode_legend_handles() -> List[Patch]:
+    return [
+        Patch(facecolor=MODE_COLORS[mode], edgecolor="white", linewidth=0.6, label=mode)
+        for mode in PLOTTED_MODE_ORDER
+    ]
+
+
 def plot_energy_breakdown(
     plotted: pd.DataFrame,
     trace_groups: List[Dict[str, object]],
@@ -682,6 +730,7 @@ def plot_energy_breakdown(
 ) -> None:
     fig, ax = plt.subplots(figsize=figure_size_for_slots(len(plotted)))
     bottoms = np.zeros(len(plotted), dtype=float)
+    edge_colors = plotted["mode"].map(MODE_COLORS).fillna("#444444").tolist()
 
     for column, label, color in ENERGY_COMPONENTS:
         normalized_column = column.replace("_nj", "_normalized")
@@ -693,8 +742,8 @@ def plot_energy_breakdown(
             width=0.82,
             bottom=bottoms[mask],
             color=color,
-            edgecolor="white",
-            linewidth=0.4,
+            edgecolor=np.array(edge_colors, dtype=object)[mask],
+            linewidth=0.9,
             label=label,
         )
         bottoms[mask] += heights[mask]
@@ -708,7 +757,23 @@ def plot_energy_breakdown(
         ylabel="Normalized Energy",
         show_reference_line=True,
     )
-    ax.legend(loc="upper left", ncol=len(ENERGY_COMPONENTS), frameon=False, fontsize=9)
+    draw_failure_labels(ax, plotted)
+    component_legend = ax.legend(
+        loc="upper left",
+        ncol=len(ENERGY_COMPONENTS),
+        frameon=False,
+        fontsize=9,
+        title="Breakdown",
+    )
+    ax.add_artist(component_legend)
+    ax.legend(
+        handles=mode_legend_handles(),
+        loc="upper right",
+        ncol=len(PLOTTED_MODE_ORDER),
+        frameon=False,
+        fontsize=9,
+        title="Config",
+    )
     fig.subplots_adjust(bottom=0.38, top=0.88, left=0.08, right=0.99)
     fig.savefig(output_path, format=fmt, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -740,6 +805,15 @@ def plot_normalized_metric(
             ylabel=ylabel,
             show_reference_line=True,
         )
+        draw_failure_labels(ax, plotted)
+        ax.legend(
+            handles=mode_legend_handles(),
+            loc="upper left",
+            ncol=len(PLOTTED_MODE_ORDER),
+            frameon=False,
+            fontsize=9,
+            title="Config",
+        )
         fig.subplots_adjust(bottom=0.38, top=0.90, left=0.08, right=0.99)
     else:
         fig, (ax_top, ax_bottom) = plt.subplots(
@@ -766,6 +840,15 @@ def plot_normalized_metric(
             ylabel=ylabel,
             show_reference_line=True,
         )
+        draw_failure_labels(ax_bottom, plotted)
+        ax_top.legend(
+            handles=mode_legend_handles(),
+            loc="upper left",
+            ncol=len(PLOTTED_MODE_ORDER),
+            frameon=False,
+            fontsize=9,
+            title="Config",
+        )
         fig.subplots_adjust(bottom=0.36, top=0.90, left=0.08, right=0.99)
 
     fig.savefig(output_path, format=fmt, dpi=dpi, bbox_inches="tight")
@@ -782,6 +865,10 @@ def write_csv(df: pd.DataFrame, output_path: Path) -> None:
         "trace_scheduler_mode",
         "eviction_policy_cfg",
         "placement_policy_cfg",
+        "run_status",
+        "failure_reason_short",
+        "failure_reason_detail",
+        "failure_exit_code",
         "source_path",
         "source_timestamp",
         "total_energy_nj",
