@@ -154,11 +154,25 @@ For each change step:
 
 ## Warm Cache Pregeneration
 
-Default shell prompt for `Qwen3-32B` BA cache warmup into the shared [ramulator.out](/home/lizhuoran200/vstack/attacc_simulator/ramulator.out):
+`ramulator2/trace_gen/pregen_ramulator_bank.py` now supports two task modes:
+
+- `direct` (default warm-cache workflow): warm exact cache-key tuples `(L, nhead, dhead, dbyte, pim_type, power_constraint)`
+- `derived` (legacy compatibility): derive `nhead` sweeps from `model/ngpu/num_hbm/batch`
+
+Direct-mode defaults:
+
+- `dhead: 80`
+- `dbyte: 2`
+- `pim_type: BA`
+- `power_constraint: 1`
+
+Default shell prompt for BA direct-key cache warmup into the shared [ramulator.out](/home/lizhuoran200/vstack/attacc_simulator/ramulator.out):
 
 ```bash
-source /home/lizhuoran200/miniconda3/etc/profile.d/conda.sh && conda activate attacc_baseline && cd /home/lizhuoran200/vstack/attacc_simulator/ramulator2/trace_gen && python3 pregen_ramulator_bank.py --model Qwen3-32B --ngpu 8 --num-hbm 5 --batch-min 16 --batch-max 16 --seqlen-min 1 --seqlen-max 31000 --maxlen-floor 4096 --dbyte 2 --power-modes 1 --workers 96 --flush-every 200 --ramulator-out /home/lizhuoran200/vstack/attacc_simulator/ramulator.out --tmp-dir /home/lizhuoran200/vstack/attacc_simulator/ramulator2/trace_gen/tmp
+source /home/lizhuoran200/miniconda3/etc/profile.d/conda.sh && conda activate attacc_baseline && cd /home/lizhuoran200/vstack/attacc_simulator/ramulator2/trace_gen && python3 pregen_ramulator_bank.py --task-mode direct --L 1:31000 --nhead 16 --dhead 80 --dbyte 2 --pim-type BA --power-constraint 1 --maxlen-floor 4096 --workers 96 --flush-every 200 --ramulator-out /home/lizhuoran200/vstack/attacc_simulator/ramulator.out --tmp-dir /home/lizhuoran200/vstack/attacc_simulator/ramulator2/trace_gen/tmp
 ```
+
+For legacy model-derived warmup, keep using `--task-mode derived` with `--model`, `--ngpu`, `--num-hbm`, and batch/sequence ranges.
 
 ## Model Config Table
 
@@ -201,4 +215,4 @@ timestamp,step,status,files,build,notes
 2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added trace arrival-rate control metadata...
 ```
 - Step IDs: C1, C2, ... (sequential)
-- Latest step: C67
+- Latest step: C70

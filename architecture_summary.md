@@ -249,6 +249,19 @@ So the division of labor is:
 - Python frontend: workload shape, system topology, scheduler, KV behavior, summary metrics
 - Ramulator backend: cycle-accurate HBM/PIM behavior for attention kernels
 
+The repo also includes a BA warm-cache pregeneration helper under `ramulator2/trace_gen/`:
+
+- `pregen_ramulator_bank.py`
+  - pre-populates `ramulator.out` without running the full simulator
+  - supports `task_mode: direct` for explicit cache keys `(L, nhead, dhead, dbyte, pim_type, power_constraint)`
+  - keeps `task_mode: derived` for the older model/ngpu/batch expansion workflow
+  - defaults direct mode to `dhead: 80`, `dbyte: 2`, `pim_type: BA`, and `power_constraint: 1`
+  - currently accepts only `BA` because it is wired to the bank-level trace generator
+- `pregen.sh`
+  - gives one-off and sweep examples for the direct-key workflow
+
+This helper writes the same cache-key schema that `src/ramulator_wrapper.py` consumes at runtime, so direct-key warmup and on-demand simulation lookups hit the same `ramulator.out` rows.
+
 ## 5) Fixed mode vs trace mode
 
 The simulator has two distinct operating modes.

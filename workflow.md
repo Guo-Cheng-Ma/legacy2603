@@ -104,6 +104,27 @@ kv_arch:
 - `src/ramulator_wrapper.py`
   - Still handles PIM attention timing for fixed mode and any estimator path that calls Ramulator-backed attention.
 
+### Warm-cache pregeneration helper
+
+- `ramulator2/trace_gen/pregen_ramulator_bank.py` pre-populates `ramulator.out` with BA Ramulator results before full simulator runs.
+- The script now supports two task builders:
+  - `task_mode: direct`
+    - primary workflow for exact cache-key warmup
+    - inputs map directly to the cache key: `L`, `nhead`, `dhead`, `dbyte`, `pim_type`, `power_constraint`
+    - `L`, `nhead`, `dhead`, and `dbyte` accept a scalar, a comma-separated list, or an inclusive `start:end[:step]` range
+    - defaults are `dhead: 80`, `dbyte: 2`, `pim_type: BA`, and `power_constraint: 1`
+    - only `BA` is accepted because this helper is wired to `gen_trace_attacc_bank.py`
+  - `task_mode: derived`
+    - legacy compatibility mode
+    - derives `nhead` sweeps from `model`, `ngpu`, `num_hbm`, and batch/sequence ranges
+- Both modes write the same cache schema used by `src/ramulator_wrapper.py`:
+
+```text
+(L, nhead, dhead, dbyte, pim_type, power_constraint) -> cycle and PIM command counters
+```
+
+- `maxlen_floor` still applies in both modes, so each direct task runs trace generation with `maxlen = max(maxlen_floor, L)`.
+
 ## 3) Fixed mode workflow
 
 Fixed mode still exists. It is selected by:
