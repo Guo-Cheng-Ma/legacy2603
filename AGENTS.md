@@ -196,4 +196,4 @@ timestamp,step,status,files,build,notes
 2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added trace arrival-rate control metadata...
 ```
 - Step IDs: C1, C2, ... (sequential)
-- Latest step: C66
+- Latest step: C67
