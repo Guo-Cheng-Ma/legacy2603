@@ -311,7 +311,7 @@ Summary YAML contains:
 
 - run metadata: system, GPU, PIM type, model, dtype, scheduler knobs
 - KV policy metadata: `trace_family`, `eviction_policy_cfg`, `placement_policy_cfg`, `replica_tier_cfg`, and resolved reserve ratios
-- arrival and completion metrics: total time, raw/effective QPS, requested QPS, timestamp scale factor, latency, TTFT, queue delay, throughput
+- arrival and completion metrics: total time, raw/effective QPS, requested QPS, timestamp scale factor, E2E latency, TTFT, TBT, queue delay, throughput
 - batch metrics: batch counts and padding stats for static scheduling
 - topology-derived KV config: per-card memory, tier capacities, bandwidth config, bytes per block
 - tier state: resident blocks, L1/L2/L3 occupancy, hit counters, hit rates, used ratios
@@ -323,7 +323,7 @@ Per-request JSONL contains:
 
 - request identity and trace fields
 - physical placement: `home_card`, `home_die`
-- arrival, start, TTFT, finish, latency
+- arrival, start, TTFT, last-token, finish, E2E latency, TBT
 - static-batch tags when static scheduling is used
 - prompt block counts, computed blocks, reused blocks, per-request KV hit rate
 - tier hit counts and relocation counters
@@ -346,7 +346,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - set `workload.mode: trace`
    - confirm `results/<date>/<family>/<trace>/S-...yaml` and `R-...jsonl` are produced for matrix configs under `configs/<family>/<trace>/...`
 5. Trace sanity checks:
-   - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, `trace_raw_qps`, `requested_qps`, `timestamp_scale_factor`, and `trace_qps`
+   - verify `total_time_s`, `throughput_tok_per_s`, `avg_ttft_s`, `avg_tbt_s`, `avg_e2e_latency_s`, `trace_raw_qps`, `requested_qps`, `timestamp_scale_factor`, and `trace_qps`
    - verify topology/KV fields such as `home_card`, `home_die`, `l1_hit_rate`, `dma_time_s`, and `migration_energy_nj`
    - when policy mode is enabled, verify `eviction_policy_cfg`, `placement_policy_cfg`, `replica_*`, and `same_chat_hit_rate`
    - verify output format assumptions: summary is YAML, requests are JSONL
@@ -355,7 +355,7 @@ Use this checklist after any frontend changes that touch configs, schedulers, ca
    - confirm the deduplicated CSV and the six figure files are produced under `figure/<yymmdd>-<hhmm>/`
    - verify repeated `(model, trace_family, mode)` summaries keep only the newest run
    - verify energy is normalized to `vstack-o` and the stacked components sum to the normalized total energy
-   - verify normalized TTFT/latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `vstack-o` baseline
+   - verify normalized TTFT/E2E-latency queue-adjusted variants subtract `avg_queue_delay_s` before dividing by the `vstack-o` baseline
    - verify the legacy `example` trace family is excluded from the deduplicated CSV and figure labels
    - verify normalized plots use the broken-axis view when any plotted value exceeds `10`
    - verify missing modes remain labeled but draw no bar
@@ -370,4 +370,4 @@ The following are stale and should not be reintroduced into documentation or scr
 - topology-agnostic KV accounting that only tracks global L1/L2/L3 totals
 - docs that describe trace-mode cache policy as fixed pure-LRU with only unique-copy placement
 - documentation that ignores `die_type`, `num_pim_die`, `compute_stack_l1`, `capacity_stack_l2`, or the YAML `QPS` trace-rate control
-- result-analysis scripts that ignore deduplication, queue-delay-adjusted TTFT/latency, or the fixed five-mode comparison order
+- result-analysis scripts that ignore deduplication, queue-delay-adjusted TTFT/E2E latency, or the fixed five-mode comparison order

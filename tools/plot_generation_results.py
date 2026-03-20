@@ -32,7 +32,7 @@ BREAK_THRESHOLD = 10.0
 BREAK_MARK_SIZE = 0.007
 THROUGHPUT_BASELINE_MODE = "attacc"
 ENERGY_BASELINE_MODE = "vstack-o"
-LATENCY_BASELINE_MODE = "vstack-o"
+E2E_LATENCY_BASELINE_MODE = "vstack-o"
 SKIPPED_TRACE_FAMILIES = {"example"}
 MODE_COLORS = {
     "attacc": "#0b3954",
@@ -64,6 +64,8 @@ TOP_LEVEL_FIELDS = [
     "total_alu_energy_nj",
     "total_comm_energy_nj",
     "avg_ttft_s",
+    "avg_tbt_s",
+    "avg_e2e_latency_s",
     "avg_latency_s",
     "avg_queue_delay_s",
     "throughput_tok_per_s",
@@ -97,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Deduplicate trace summary YAMLs and render generation-result figures "
-            "for energy, throughput, TTFT, and latency."
+            "for energy, throughput, TTFT, and E2E latency."
         )
     )
     parser.add_argument(
@@ -241,14 +243,16 @@ def infer_trace_family(rel_parts: Tuple[str, ...], summary: Dict[str, object]) -
     return normalize_trace_family(str(summary.get("input_request_name") or "unknown"))
 
 
-def metric_or_nan(summary: Dict[str, object], key: str) -> float:
-    value = summary.get(key)
-    if value is None or value == "":
-        return math.nan
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return math.nan
+def metric_or_nan(summary: Dict[str, object], key: str, *fallback_keys: str) -> float:
+    for candidate in (key, *fallback_keys):
+        value = summary.get(candidate)
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return math.nan
 
 
 def safe_adjust(metric: float, queue_delay: float) -> float:
@@ -293,7 +297,8 @@ def discover_latest_summaries(results_root: Path) -> Tuple[List[Dict[str, object
             "total_alu_energy_nj": metric_or_nan(summary, "total_alu_energy_nj"),
             "total_comm_energy_nj": metric_or_nan(summary, "total_comm_energy_nj"),
             "avg_ttft_s": metric_or_nan(summary, "avg_ttft_s"),
-            "avg_latency_s": metric_or_nan(summary, "avg_latency_s"),
+            "avg_tbt_s": metric_or_nan(summary, "avg_tbt_s"),
+            "avg_e2e_latency_s": metric_or_nan(summary, "avg_e2e_latency_s", "avg_latency_s"),
             "avg_queue_delay_s": metric_or_nan(summary, "avg_queue_delay_s"),
             "throughput_tok_per_s": metric_or_nan(summary, "throughput_tok_per_s"),
         }
@@ -339,17 +344,19 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
         for trace_family in traces_per_model[model]:
             throughput_baseline = selected.get((model, trace_family, throughput_baseline_mode))
             energy_baseline = selected.get((model, trace_family, ENERGY_BASELINE_MODE))
-            latency_baseline = selected.get((model, trace_family, LATENCY_BASELINE_MODE))
+            e2e_latency_baseline = selected.get((model, trace_family, E2E_LATENCY_BASELINE_MODE))
             baseline_queue = (
-                float(latency_baseline["avg_queue_delay_s"])
-                if latency_baseline is not None
+                float(e2e_latency_baseline["avg_queue_delay_s"])
+                if e2e_latency_baseline is not None
                 else math.nan
             )
             baseline_ttft = (
-                float(latency_baseline["avg_ttft_s"]) if latency_baseline is not None else math.nan
+                float(e2e_latency_baseline["avg_ttft_s"]) if e2e_latency_baseline is not None else math.nan
             )
-            baseline_latency = (
-                float(latency_baseline["avg_latency_s"]) if latency_baseline is not None else math.nan
+            baseline_e2e_latency = (
+                float(e2e_latency_baseline["avg_e2e_latency_s"])
+                if e2e_latency_baseline is not None
+                else math.nan
             )
             baseline_throughput = (
                 float(throughput_baseline["throughput_tok_per_s"])
@@ -360,7 +367,7 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                 float(energy_baseline["total_energy_nj"]) if energy_baseline is not None else math.nan
             )
             baseline_ttft_adjusted = safe_adjust(baseline_ttft, baseline_queue)
-            baseline_latency_adjusted = safe_adjust(baseline_latency, baseline_queue)
+            baseline_e2e_latency_adjusted = safe_adjust(baseline_e2e_latency, baseline_queue)
 
             for mode in MODE_ORDER:
                 record = selected.get((model, trace_family, mode))
@@ -390,7 +397,8 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                         "total_alu_energy_nj",
                         "total_comm_energy_nj",
                         "avg_ttft_s",
-                        "avg_latency_s",
+                        "avg_tbt_s",
+                        "avg_e2e_latency_s",
                         "avg_queue_delay_s",
                         "throughput_tok_per_s",
                     ):
@@ -415,7 +423,8 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                         "total_alu_energy_nj",
                         "total_comm_energy_nj",
                         "avg_ttft_s",
-                        "avg_latency_s",
+                        "avg_tbt_s",
+                        "avg_e2e_latency_s",
                         "avg_queue_delay_s",
                         "throughput_tok_per_s",
                     ):
@@ -424,8 +433,8 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                 row["ttft_minus_queue_s"] = safe_adjust(
                     float(row["avg_ttft_s"]), float(row["avg_queue_delay_s"])
                 )
-                row["latency_minus_queue_s"] = safe_adjust(
-                    float(row["avg_latency_s"]), float(row["avg_queue_delay_s"])
+                row["e2e_latency_minus_queue_s"] = safe_adjust(
+                    float(row["avg_e2e_latency_s"]), float(row["avg_queue_delay_s"])
                 )
                 row["energy_normalized"] = safe_ratio(
                     float(row["total_energy_nj"]), baseline_total_energy
@@ -447,11 +456,11 @@ def build_complete_dataframe(records: Iterable[Dict[str, object]], throughput_ba
                 row["ttft_minus_queue_normalized"] = safe_ratio(
                     float(row["ttft_minus_queue_s"]), baseline_ttft_adjusted
                 )
-                row["latency_raw_normalized"] = safe_ratio(
-                    float(row["avg_latency_s"]), baseline_latency
+                row["e2e_latency_raw_normalized"] = safe_ratio(
+                    float(row["avg_e2e_latency_s"]), baseline_e2e_latency
                 )
-                row["latency_minus_queue_normalized"] = safe_ratio(
-                    float(row["latency_minus_queue_s"]), baseline_latency_adjusted
+                row["e2e_latency_minus_queue_normalized"] = safe_ratio(
+                    float(row["e2e_latency_minus_queue_s"]), baseline_e2e_latency_adjusted
                 )
                 rows.append(row)
 
@@ -793,13 +802,14 @@ def write_csv(df: pd.DataFrame, output_path: Path) -> None:
         "throughput_normalized",
         "avg_queue_delay_s",
         "avg_ttft_s",
+        "avg_tbt_s",
         "ttft_raw_normalized",
         "ttft_minus_queue_s",
         "ttft_minus_queue_normalized",
-        "avg_latency_s",
-        "latency_raw_normalized",
-        "latency_minus_queue_s",
-        "latency_minus_queue_normalized",
+        "avg_e2e_latency_s",
+        "e2e_latency_raw_normalized",
+        "e2e_latency_minus_queue_s",
+        "e2e_latency_minus_queue_normalized",
     ]
     df.to_csv(output_path, columns=ordered_columns, index=False)
 
@@ -865,10 +875,10 @@ def main() -> None:
         plotted,
         trace_groups,
         model_groups,
-        "latency_raw_normalized",
-        "Generation Latency (Raw, Normalized to VStack-O)",
-        "Normalized Latency",
-        output_dir / f"generation_latency_normalized_raw.{args.format}",
+        "e2e_latency_raw_normalized",
+        "Generation E2E Latency (Raw, Normalized to VStack-O)",
+        "Normalized E2E Latency",
+        output_dir / f"generation_e2e_latency_normalized_raw.{args.format}",
         args.format,
         args.dpi,
     )
@@ -876,10 +886,10 @@ def main() -> None:
         plotted,
         trace_groups,
         model_groups,
-        "latency_minus_queue_normalized",
-        "Generation Latency (Avg Queue Delay Removed, Then Normalized to VStack-O)",
-        "Normalized Latency",
-        output_dir / f"generation_latency_normalized_minus_queue.{args.format}",
+        "e2e_latency_minus_queue_normalized",
+        "Generation E2E Latency (Avg Queue Delay Removed, Then Normalized to VStack-O)",
+        "Normalized E2E Latency",
+        output_dir / f"generation_e2e_latency_normalized_minus_queue.{args.format}",
         args.format,
         args.dpi,
     )

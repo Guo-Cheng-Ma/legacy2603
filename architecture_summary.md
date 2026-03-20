@@ -214,14 +214,14 @@ The frontend also has a lightweight post-processing layer under `tools/` for ana
   - scans trace summary YAMLs
   - deduplicates repeated runs by `(model, trace_family, mode)` while keeping the newest summary
   - exports a tidy CSV plus matplotlib figures under `figure/<yymmdd>-<hhmm>/` by default
-  - renders energy breakdown normalized to `vstack-o`, normalized throughput, and TTFT/latency normalized to `vstack-o`
+  - renders energy breakdown normalized to `vstack-o`, normalized throughput, and TTFT/E2E latency normalized to `vstack-o`
   - uses a broken y-axis for normalized plots when large outliers would otherwise flatten the smaller bars
   - filters out the legacy `example` trace family from grouped analysis output
   - keeps empty slots visible when a `(model, trace_family, mode)` combination is missing
 
 This layer answers questions such as:
 
-- how arrival rate affects TTFT and latency
+- how arrival rate affects TTFT, TBT, and E2E latency
 - how much prefix reuse comes from shared `hash_id` blocks
 - whether L1/L2/L3 pressure or PCIe spill dominates performance
 - whether workload-aware eviction improves reuse over the `all_unique + lru` baseline
@@ -260,7 +260,7 @@ Trace mode:
 
 - consumes a request trace with arrival times and per-request lengths
 - simulates queueing, batching, backfill, KV reuse, migration, and completion timing
-- is useful for service-level studies such as TTFT, latency, throughput, and cache pressure
+- is useful for service-level studies such as TTFT, TBT, E2E latency, throughput, and cache pressure
 
 Both modes share the same underlying device/model descriptions. Trace mode adds the request scheduler and KV-memory system on top of the fixed-shape estimator.
 
@@ -279,4 +279,4 @@ More concretely, the simulator is built to study tradeoffs among:
 - LRU vs workload-aware eviction
 - DMA / NVLink / PCIe movement cost
 - continuous vs static batching
-- throughput, TTFT, latency, and energy
+- throughput, TTFT, TBT, E2E latency, and energy

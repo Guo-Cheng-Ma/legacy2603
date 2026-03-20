@@ -121,8 +121,8 @@ For each change step:
   - `figure/<yymmdd>-<hhmm>/generation_throughput_normalized.png`
   - `figure/<yymmdd>-<hhmm>/generation_ttft_normalized_raw.png`
   - `figure/<yymmdd>-<hhmm>/generation_ttft_normalized_minus_queue.png`
-  - `figure/<yymmdd>-<hhmm>/generation_latency_normalized_raw.png`
-  - `figure/<yymmdd>-<hhmm>/generation_latency_normalized_minus_queue.png`
+  - `figure/<yymmdd>-<hhmm>/generation_e2e_latency_normalized_raw.png`
+  - `figure/<yymmdd>-<hhmm>/generation_e2e_latency_normalized_minus_queue.png`
   - `figure/<yymmdd>-<hhmm>/generation_metrics_dedup.csv`
 - Grouping:
   - bottom layer: model
@@ -135,13 +135,13 @@ For each change step:
 - Dedup rule:
   - if multiple summaries map to the same `(model, trace_family, mode)`, keep the newest file by `<date>` folder and filename `<HHMMSS>` suffix
 - Queue-adjusted metrics:
-  - raw TTFT and latency are normalized directly to `vstack-o`
-  - adjusted TTFT and latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `vstack-o` adjusted value
+  - raw TTFT and E2E latency are normalized directly to `vstack-o`
+  - adjusted TTFT and E2E latency first subtract `avg_queue_delay_s`, clamp at zero, then normalize to the corresponding `vstack-o` adjusted value
 - Baselines:
   - energy breakdown is normalized to `vstack-o`
   - throughput remains normalized to the plotting CLI throughput baseline, default `attacc`
 - Large normalized outliers:
-  - if a normalized throughput or latency/TTFT value exceeds `10`, the plot uses a broken y-axis with diagonal break marks so smaller bars remain readable
+  - if a normalized throughput or E2E-latency/TTFT value exceeds `10`, the plot uses a broken y-axis with diagonal break marks so smaller bars remain readable
 - Trace filtering:
   - skip the legacy `example` trace family so it never appears in labels or the deduplicated CSV
 - Missing data:
@@ -196,4 +196,4 @@ timestamp,step,status,files,build,notes
 2026-02-26T20:41:51+08:00,C39,completed,main.py|src/trace_loader.py|src/trace_simulator.py|timeline.csv,cmake+make pass,added trace arrival-rate control metadata...
 ```
 - Step IDs: C1, C2, ... (sequential)
-- Latest step: C65
+- Latest step: C66

@@ -470,6 +470,7 @@ class ContinuousScheduler:
             req.generated_tokens += 1
             if req.first_token_time is None:
                 req.first_token_time = finished_time
+            req.last_token_time = finished_time
             if req.generated_tokens >= req.output_length:
                 req.set_state(RequestLifecycle.DONE)
                 req.finish_time = finished_time

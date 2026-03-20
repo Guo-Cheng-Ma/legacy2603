@@ -133,8 +133,9 @@ def _collect_system_metadata(system, requests: List[RequestState], max_batch_siz
 
 
 def _summarize_requests(requests: List[RequestState], total_time: float) -> Dict:
-    latencies = [req.latency for req in requests if req.latency is not None]
+    e2e_latencies = [req.e2e_latency for req in requests if req.e2e_latency is not None]
     ttfts = [req.ttft for req in requests if req.ttft is not None]
+    tbts = [req.tbt for req in requests if req.tbt is not None]
     queue_delays = [
         max(0.0, req.start_time - req.timestamp)
         for req in requests
@@ -155,8 +156,9 @@ def _summarize_requests(requests: List[RequestState], total_time: float) -> Dict
     num_multiturn = sum(1 for req in requests if req.trace.turn > 1)
     num_singleturn = num_requests - num_multiturn
 
-    avg_latency = (sum(latencies) / len(latencies)) if latencies else 0.0
+    avg_e2e_latency = (sum(e2e_latencies) / len(e2e_latencies)) if e2e_latencies else 0.0
     avg_ttft = (sum(ttfts) / len(ttfts)) if ttfts else 0.0
+    avg_tbt = (sum(tbts) / len(tbts)) if tbts else 0.0
     avg_queue_delay = (sum(queue_delays) / len(queue_delays)) if queue_delays else 0.0
 
     throughput_req = (num_requests / total_time) if total_time > 0 else 0.0
@@ -170,12 +172,15 @@ def _summarize_requests(requests: List[RequestState], total_time: float) -> Dict
         'arrival_span_s': arrival_span_s,
         'trace_qps': arrival_rate_req,
         'arrival_rate_req_per_s': arrival_rate_req,
-        'avg_latency_s': avg_latency,
-        'p50_latency_s': _percentile(latencies, 0.50),
-        'p95_latency_s': _percentile(latencies, 0.95),
+        'avg_e2e_latency_s': avg_e2e_latency,
+        'p50_e2e_latency_s': _percentile(e2e_latencies, 0.50),
+        'p95_e2e_latency_s': _percentile(e2e_latencies, 0.95),
         'avg_ttft_s': avg_ttft,
         'p50_ttft_s': _percentile(ttfts, 0.50),
         'p95_ttft_s': _percentile(ttfts, 0.95),
+        'avg_tbt_s': avg_tbt,
+        'p50_tbt_s': _percentile(tbts, 0.50),
+        'p95_tbt_s': _percentile(tbts, 0.95),
         'avg_queue_delay_s': avg_queue_delay,
         'p50_queue_delay_s': _percentile(queue_delays, 0.50),
         'p95_queue_delay_s': _percentile(queue_delays, 0.95),
@@ -320,9 +325,11 @@ def run_trace_simulation(
             'batch_finish_s': req.tags.get("batch_finish_s"),
             'queue_delay_s': (req.start_time - req.timestamp) if req.start_time is not None else None,
             'first_token_s': req.first_token_time,
+            'last_token_s': req.last_token_time,
             'finish_s': req.finish_time,
-            'latency_s': req.latency,
+            'e2e_latency_s': req.e2e_latency,
             'ttft_s': req.ttft,
+            'tbt_s': req.tbt,
             'input_tokens': req.input_length,
             'output_tokens': req.output_length,
             'prompt_blocks': req.prompt_block_count,
@@ -611,12 +618,15 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'max_output_tokens',
         'total_prompt_blocks',
         'avg_prompt_blocks',
-        'avg_latency_s',
-        'p50_latency_s',
-        'p95_latency_s',
+        'avg_e2e_latency_s',
+        'p50_e2e_latency_s',
+        'p95_e2e_latency_s',
         'avg_ttft_s',
         'p50_ttft_s',
         'p95_ttft_s',
+        'avg_tbt_s',
+        'p50_tbt_s',
+        'p95_tbt_s',
         'avg_queue_delay_s',
         'p50_queue_delay_s',
         'p95_queue_delay_s',
@@ -769,9 +779,11 @@ def write_trace_outputs(result, summary_path='trace_summary.yaml', requests_path
         'batch_finish_s',
         'queue_delay_s',
         'first_token_s',
+        'last_token_s',
         'finish_s',
-        'latency_s',
+        'e2e_latency_s',
         'ttft_s',
+        'tbt_s',
         'input_tokens',
         'output_tokens',
         'prompt_blocks',

@@ -475,6 +475,7 @@ class StaticBatchScheduler:
                     req.generated_tokens += 1
                     if req.first_token_time is None:
                         req.first_token_time = finished_time
+                    req.last_token_time = finished_time
 
             if self.debug and (step_idx < 5 or (step_idx + 1) % self.debug_interval == 0):
                 self._log(

@@ -68,6 +68,7 @@ class RequestState:
     enqueued_time: Optional[float] = None
     start_time: Optional[float] = None
     first_token_time: Optional[float] = None
+    last_token_time: Optional[float] = None
     finish_time: Optional[float] = None
     tags: dict = field(default_factory=dict)
 
@@ -102,10 +103,22 @@ class RequestState:
         return self.first_token_time - self.timestamp
 
     @property
-    def latency(self) -> Optional[float]:
+    def e2e_latency(self) -> Optional[float]:
         if self.finish_time is None or self.timestamp is None:
             return None
         return self.finish_time - self.timestamp
+
+    @property
+    def latency(self) -> Optional[float]:
+        return self.e2e_latency
+
+    @property
+    def tbt(self) -> Optional[float]:
+        if self.output_length <= 1:
+            return None
+        if self.first_token_time is None or self.last_token_time is None:
+            return None
+        return (self.last_token_time - self.first_token_time) / float(self.output_length - 1)
 
     def set_state(self, state: RequestLifecycle) -> None:
         self.state = state
