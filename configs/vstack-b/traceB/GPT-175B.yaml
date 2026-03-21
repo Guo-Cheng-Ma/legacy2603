@@ -28,7 +28,7 @@ trace:
   max_batch_size: 16
   prefill_chunk_tokens: 128
   trace_scheduler: continuous
-  QPS: 4.0
+  QPS: 8.0
   trace_debug: true
   trace_debug_interval: 1
 
